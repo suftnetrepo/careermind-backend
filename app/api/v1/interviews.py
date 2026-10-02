@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from openai import AsyncOpenAI
 from app.db.engine import get_db
@@ -10,7 +10,9 @@ from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
 from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
+import asyncio
 import httpx
+import io
 import logging
 import uuid
 import json
@@ -23,6 +25,20 @@ REALTIME_TOKEN_TTL_SECONDS = 60
 REALTIME_VOICES = ("alloy", "ash", "coral", "echo", "marin", "cedar")
 DEFAULT_VOICE = "alloy"
 COACHING_TAGS = ("positive", "tip", "pitfall")
+MAX_CV_BYTES = 5 * 1024 * 1024
+CV_TEXT_LIMIT = 8000
+SETUP_RETRY_DELAY_SECONDS = 2
+
+
+def extract_pdf_text(contents: bytes) -> tuple[str, int]:
+    """Return (text, page_count) for a PDF."""
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(io.BytesIO(contents))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n\n".join(pages), len(reader.pages)
+    except Exception as e:
+        raise HTTPException(422, f"Failed to read PDF: {str(e)}")
 
 
 def build_interviewer_prompt(
@@ -30,11 +46,28 @@ def build_interviewer_prompt(
     level: str,
     duration_minutes: int,
     questions: list[dict],
+    cv_text: str | None = None,
+    custom_prompt: str | None = None,
+    preset_prompts: list[str] | None = None,
 ) -> str:
     questions_text = "\n".join([
         f"- {q['question']} (follow-up: {q.get('follow_up', '')})"
         for q in questions
     ])
+
+    # What the candidate told us at setup — Alex should act on it live, not just
+    # the question generator (e.g. "Be encouraging — I get nervous")
+    candidate_parts = []
+    if preset_prompts:
+        candidate_parts.append("Their preferences for this interview:\n" + "\n".join(f"- {p}" for p in preset_prompts))
+    if custom_prompt:
+        candidate_parts.append(f"A note from the candidate:\n{custom_prompt}")
+    if cv_text:
+        candidate_parts.append(f"Their CV (refer to their real experience naturally):\n{cv_text[:3000]}")
+    candidate_section = (
+        "ABOUT THE CANDIDATE:\n" + "\n\n".join(candidate_parts) + "\n\n"
+        if candidate_parts else ""
+    )
 
     return f"""You are Alex, a senior hiring manager at a leading technology company. You are conducting a real job interview for a {level}-level {role} position.
 
@@ -63,7 +96,7 @@ INTERVIEW STRUCTURE:
 YOUR QUESTIONS (work through these naturally):
 {questions_text}
 
-CRITICAL RULES:
+{candidate_section}CRITICAL RULES:
 - NEVER say "Question 1", "Question 2" or number questions
 - NEVER ignore what the candidate just said
 - NEVER read questions robotically — weave them naturally
@@ -81,12 +114,15 @@ FREE_INTERVIEW_MINUTES = 15
 
 
 class SetupRequest(BaseModel):
-    role:             str
+    role:             str = Field(min_length=1, max_length=100)
     level:            str
     focus:            str
-    duration_minutes: int = 15
-    job_description:  Optional[str] = None
+    duration_minutes: int = 30
     voice:            str = DEFAULT_VOICE
+    job_description:  Optional[str] = Field(default=None, max_length=10000)
+    cv_text:          Optional[str] = Field(default=None, max_length=CV_TEXT_LIMIT)
+    custom_prompt:    Optional[str] = Field(default=None, max_length=1000)
+    preset_prompts:   Optional[list[str]] = Field(default=None, max_length=10)
 
 
 class StartRequest(BaseModel):
@@ -97,6 +133,7 @@ class CoachingRequest(BaseModel):
     question: str
     answer:   str
     role:     str
+    last_tag: Optional[str] = None
 
 
 class EndRequest(BaseModel):
@@ -124,12 +161,25 @@ async def setup_interview(
         if req.duration_minutes not in ALLOWED_DURATIONS:
             raise HTTPException(400, f"Duration must be one of: {ALLOWED_DURATIONS}")
 
-    questions = await generate_questions(
+    generate = lambda: generate_questions(
         role=req.role,
         level=req.level,
         focus=req.focus,
         job_description=req.job_description,
+        cv_text=req.cv_text,
+        custom_prompt=req.custom_prompt,
+        preset_prompts=req.preset_prompts,
     )
+    try:
+        questions = await generate()
+    except HTTPException as e:
+        # generate_questions reports every OpenAI failure as a 502 — give it
+        # one more silent go before surfacing the error
+        if e.status_code != 502:
+            raise
+        logger.warning("Question generation failed, retrying once")
+        await asyncio.sleep(SETUP_RETRY_DELAY_SECONDS)
+        questions = await generate()
 
     session = InterviewSession(
         id=uuid.uuid4(),
@@ -139,6 +189,9 @@ async def setup_interview(
         focus=req.focus,
         duration_minutes=req.duration_minutes,
         job_description=req.job_description,
+        cv_text=req.cv_text,
+        custom_prompt=req.custom_prompt,
+        preset_prompts=json.dumps(req.preset_prompts or []),
         voice=req.voice,
         questions_json=json.dumps(questions),
         status=InterviewStatus.setup,
@@ -174,6 +227,34 @@ async def setup_interview(
         "is_free":          session.is_free,
         "paid":             session.paid,
         "amount_pence":     session.amount_pence,
+    }
+
+
+@router.post("/upload-cv")
+async def upload_cv(
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+):
+    """Extract text from a CV PDF so the frontend can send it with /setup."""
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF files are accepted")
+    # file.size isn't always set for multipart uploads — measure what we read
+    contents = await file.read(MAX_CV_BYTES + 1)
+    if len(contents) > MAX_CV_BYTES:
+        raise HTTPException(400, "File must be under 5MB")
+    if not contents.startswith(b"%PDF"):
+        raise HTTPException(400, "That file is not a valid PDF")
+
+    text, pages = extract_pdf_text(contents)
+    if not text.strip():
+        raise HTTPException(
+            400,
+            "Could not extract text from PDF. Make sure it is not a scanned image.",
+        )
+    return {
+        "cv_text": text[:CV_TEXT_LIMIT],
+        "pages":   pages,
+        "words":   len(text.split()),
     }
 
 
@@ -235,6 +316,9 @@ async def get_realtime_token(
         level=interview.level,
         duration_minutes=interview.duration_minutes,
         questions=questions,
+        cv_text=interview.cv_text,
+        custom_prompt=interview.custom_prompt,
+        preset_prompts=json.loads(interview.preset_prompts or "[]"),
     )
 
     async with httpx.AsyncClient(timeout=15) as client:
@@ -314,10 +398,14 @@ Return JSON only, no other text:
   "try_instead": "optional — a better way to phrase it (only for pitfall)"
 }}
 
-tag meanings:
-- positive: they did something well — reinforce it
-- tip: good answer but could be stronger — one improvement
-- pitfall: something to avoid — potentially damaging
+IMPORTANT: Do not always return "pitfall". Distribute feedback fairly:
+- "positive": when the candidate did something well — clear explanation, good example, strong structure, confident delivery
+- "tip": when the answer is good but could be stronger with one improvement
+- "pitfall": only when something could genuinely hurt their chances — biased language, factually wrong, very vague, no structure at all
+
+A solid answer should get "positive" or "tip", not "pitfall". Reserve "pitfall" for real issues.
+Vary your tags across the session. If the last 2 notes were both pitfall, look for something positive to highlight.
+{f"The previous coaching note was tagged '{req.last_tag}'. Try to vary the tag if possible." if req.last_tag in COACHING_TAGS else ""}
 
 Be specific to what they actually said.
 Keep each field under 20 words.

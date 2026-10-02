@@ -52,6 +52,9 @@ class InterviewSession(Base):
     focus            = Column(String, nullable=False)
     duration_minutes = Column(Integer, default=15)
     voice            = Column(String, default="alloy")   # Realtime API voice for Alex
+    cv_text          = Column(Text, nullable=True)
+    custom_prompt    = Column(Text, nullable=True)
+    preset_prompts   = Column(Text, nullable=True)        # JSON list of preset strings
     job_description  = Column(Text, nullable=True)
 
     # Generated content

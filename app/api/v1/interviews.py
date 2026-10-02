@@ -31,6 +31,17 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 CV_TEXT_LIMIT = 8000
 SETUP_RETRY_DELAY_SECONDS = 2
 FEEDBACK_RETRY_DELAY_SECONDS = 3
+STUDY_TIMEOUT_SECONDS = 60.0
+QUIZ_RETRY_DELAY_SECONDS = 2
+
+
+async def _generate_quiz_with_retry(role, level, questions, transcript):
+    try:
+        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript)
+    except Exception as e:
+        logger.warning("Quiz generation attempt 1 failed: %s. Retrying...", e)
+        await asyncio.sleep(QUIZ_RETRY_DELAY_SECONDS)
+        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript)
 
 # asyncio only keeps weak references to tasks — hold background feedback jobs
 # here so they aren't garbage-collected before they finish
@@ -601,20 +612,23 @@ async def generate_study_materials(
 
     # Generate both in parallel
     try:
-        quiz, flashcards = await asyncio.gather(
-            generate_quiz(
-                role=interview.role,
-                level=interview.level,
-                questions=questions,
-                transcript=transcript,
+        quiz, flashcards = await asyncio.wait_for(
+            asyncio.gather(
+                _generate_quiz_with_retry(
+                    interview.role, interview.level, questions, transcript,
+                ),
+                generate_flashcards(
+                    role=interview.role,
+                    level=interview.level,
+                    questions=questions,
+                    cv_text=interview.cv_text,
+                ),
             ),
-            generate_flashcards(
-                role=interview.role,
-                level=interview.level,
-                questions=questions,
-                cv_text=interview.cv_text,
-            ),
+            timeout=STUDY_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.error("Study material generation timed out for %s", interview_id)
+        raise HTTPException(504, "Study materials generation timed out. Please try again.")
     except Exception:
         logger.exception("Study material generation failed for %s", interview_id)
         raise HTTPException(502, "Could not generate study materials. Please try again.")

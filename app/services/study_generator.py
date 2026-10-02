@@ -10,11 +10,141 @@ settings = get_settings()
 
 QUIZ_SIZE = 25
 QUIZ_MIN = 20
-QUIZ_BATCH_SIZE = 5
-# 5 easy, 15 medium, 5 hard — one batch per entry, generated in parallel.
-# A single 25-question request is slow (~30s) and unreliable on count (it
-# returned 8 and 24 in testing); batches of 5 come back complete in ~10s.
-QUIZ_BATCHES = ["easy", "medium", "medium", "medium", "hard"]
+QUIZ_BATCHES = 5
+# Each parallel batch writes 5 questions on its own share of the role's topics:
+# 1 easy, 3 medium, 1 hard — 5/15/5 across the quiz. One 25-question request was
+# slow (up to 30s) and unreliable on count (it returned 8 and 24 in testing).
+BATCH_MIX = {"easy": 1, "medium": 3, "hard": 1}
+WEAK_AREA_QUESTIONS = 3   # hard questions aimed at weak answers, one per batch
+WEAK_AREA_ANGLES = [
+    "the underlying concept",
+    "how to implement it in practice",
+    "debugging it or choosing between trade-offs",
+]
+DUPLICATE_OVERLAP = 0.7   # share of key words two questions must share to count as the same
+DUPLICATE_MIN_WORDS = 3
+STOPWORDS = {
+    "a", "an", "the", "of", "in", "on", "to", "for", "and", "or", "is", "are", "be", "by",
+    "with", "what", "which", "how", "why", "when", "does", "do", "you", "your", "would",
+    "can", "could", "should", "following", "best", "describes", "true", "statement",
+    "correct", "way", "use", "using", "used", "primary", "main", "purpose", "it", "its",
+    "that", "this", "from", "most", "into", "an", "app", "application",
+}
+
+ROLE_TOPICS = {
+    "React Native Developer": [
+        "Core components (View, Text, ScrollView, FlatList, SectionList)",
+        "Navigation (React Navigation, stack, tab, drawer)",
+        "State management (useState, useReducer, Context, Redux, Zustand)",
+        "Hooks (useEffect, useMemo, useCallback, useRef, custom hooks)",
+        "Styling (StyleSheet, Flexbox, responsive design, platform-specific)",
+        "Native modules and bridging",
+        "Performance optimisation (memo, lazy loading, Hermes)",
+        "Animations (Animated API, Reanimated, LayoutAnimation)",
+        "Networking (fetch, Axios, REST, GraphQL)",
+        "Storage (AsyncStorage, MMKV, SQLite)",
+        "Push notifications (FCM, APNs, Expo)",
+        "Testing (Jest, React Native Testing Library, Detox)",
+        "Deployment (App Store, Play Store, CodePush, EAS)",
+    ],
+    "AI Engineer": [
+        "RAG pipeline design and evaluation",
+        "LLM fine-tuning vs prompt engineering",
+        "Vector databases and embeddings",
+        "MLOps and model deployment",
+        "OpenAI API and tool use",
+        "LangChain and LlamaIndex",
+        "Evaluation metrics (RAGAS, BLEU)",
+        "Context window management",
+        "Agent architectures",
+        "Safety and hallucination mitigation",
+    ],
+    "Python Developer": [
+        "Core Python (decorators, generators, context managers, metaclasses)",
+        "Async programming (asyncio, await, event loop)",
+        "Testing (pytest, mocking, fixtures)",
+        "FastAPI and REST API design",
+        "Database (SQLAlchemy, Alembic, raw SQL)",
+        "Performance and profiling",
+        "Data structures and algorithms",
+        "Type hints and mypy",
+        "Packaging and virtual environments",
+        "Concurrency and multiprocessing",
+    ],
+    "Full Stack Developer": [
+        "React fundamentals and hooks",
+        "Next.js (SSR, SSG, App Router)",
+        "TypeScript",
+        "REST API design",
+        "Database design and SQL",
+        "Authentication and security",
+        "CSS and responsive design",
+        "Testing (unit, integration, e2e)",
+        "CI/CD and deployment",
+        "Performance optimisation",
+    ],
+    "Frontend Developer": [
+        "React hooks and lifecycle",
+        "State management",
+        "TypeScript",
+        "CSS and responsive design",
+        "Browser APIs and performance",
+        "Testing",
+        "Accessibility",
+        "Build tools and bundlers",
+        "Security (XSS, CSRF)",
+        "Web vitals and optimisation",
+    ],
+    "Backend Developer": [
+        "API design (REST, GraphQL)",
+        "Database design and optimisation",
+        "Authentication and authorisation",
+        "Caching strategies",
+        "Message queues",
+        "Microservices architecture",
+        "Security best practices",
+        "Testing strategies",
+        "Scalability and performance",
+        "Containerisation and deployment",
+    ],
+    "Data Scientist": [
+        "Statistics and probability",
+        "Machine learning algorithms",
+        "Feature engineering",
+        "Model evaluation and validation",
+        "pandas and numpy",
+        "Scikit-learn",
+        "Deep learning basics",
+        "Data visualisation",
+        "SQL for data analysis",
+        "A/B testing",
+    ],
+    "DevOps Engineer": [
+        "Docker and containerisation",
+        "Kubernetes orchestration",
+        "CI/CD pipelines",
+        "Infrastructure as Code (Terraform)",
+        "Cloud platforms (AWS/GCP/Azure)",
+        "Monitoring and observability",
+        "Security and secrets management",
+        "Networking fundamentals",
+        "Linux administration",
+        "Incident response",
+    ],
+}
+
+DEFAULT_TOPICS = [
+    "Core concepts and fundamentals",
+    "Best practices and patterns",
+    "Problem solving and debugging",
+    "Performance and scalability",
+    "Testing and quality",
+    "Security considerations",
+    "Tools and ecosystem",
+    "Architecture and design",
+    "Communication and process",
+    "Real-world application",
+]
 OPTION_IDS = ["a", "b", "c", "d"]
 SHORT_ANSWER_WORDS = 15
 MAX_WEAK_AREAS = 5
@@ -36,22 +166,6 @@ def find_weak_areas(transcript: list[dict] | None) -> list[str]:
             if len(text.split()) < SHORT_ANSWER_WORDS:
                 weak_areas.append(f"Asked: '{last_alex}' — gave a very short answer: '{text}'")
     return weak_areas[:MAX_WEAK_AREAS]
-
-
-def _weak_areas_text(weak_areas: list[str], difficulty: str) -> str:
-    if not weak_areas:
-        return ""
-    # Each batch has one difficulty, so the targeting instruction depends on it
-    instruction = {
-        "hard":   "At least 3 of these 5 hard questions must target these weak areas.",
-        "medium": "Include questions on these weak areas in this set.",
-    }.get(difficulty, "")
-    return f"""
-CANDIDATE WEAK AREAS (from transcript):
-The candidate gave short or weak answers here:
-{chr(10).join(f'- {w}' for w in weak_areas)}
-{instruction}
-"""
 
 
 def _schema(name: str, items_key: str, item_properties: dict) -> dict:
@@ -83,14 +197,46 @@ def _schema(name: str, items_key: str, item_properties: dict) -> dict:
 # The model writes answers as text and we assign a–d after shuffling. When it
 # lettered the options itself, the right answer was "b" 21 times out of 25 and
 # explanations referred to letters, which made reordering unsafe.
-QUIZ_SCHEMA = _schema("quiz", "questions", {
-    "question":       {"type": "string"},
-    "topic":          {"type": "string"},
-    "difficulty":     {"type": "string", "enum": ["easy", "medium", "hard"]},
-    "correct_answer": {"type": "string"},
-    "wrong_answers":  {"type": "array", "items": {"type": "string"}},
-    "explanation":    {"type": "string"},
-})
+def _quiz_schema(topic_labels: list[str]) -> dict:
+    # Topic is restricted to the role's list so the results screen can group by it
+    return _schema("quiz", "questions", {
+        "question":       {"type": "string"},
+        "topic":          {"type": "string", "enum": topic_labels},
+        "difficulty":     {"type": "string", "enum": ["easy", "medium", "hard"]},
+        "correct_answer": {"type": "string"},
+        "wrong_answers":  {"type": "array", "items": {"type": "string"}},
+        "explanation":    {"type": "string"},
+    })
+
+
+def _topic_label(topic: str) -> str:
+    """'Navigation (React Navigation, stack, tab, drawer)' -> 'Navigation'"""
+    return topic.split("(")[0].strip()
+
+
+def _key_words(question: str, role: str) -> set[str]:
+    """Content words, singular, without filler or the role name — so 'schedules
+    coroutines' and 'schedule coroutines' compare equal."""
+    ignore = STOPWORDS | {w.lower() for w in role.split()}
+    words = set()
+    for w in question.lower().split():
+        w = w.strip(".,?!:;'\"()`")
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        if w and w not in ignore:
+            words.add(w)
+    return words
+
+
+def _is_duplicate(question: str, role: str, seen: list[set[str]]) -> bool:
+    words = _key_words(question, role)
+    for other in seen:
+        smaller = min(len(words), len(other))
+        if smaller >= DUPLICATE_MIN_WORDS and len(words & other) / smaller >= DUPLICATE_OVERLAP:
+            return True
+    seen.append(words)
+    return False
+
 
 FLASHCARD_SCHEMA = _schema("flashcards", "flashcards", {
     "front": {"type": "string"},
@@ -121,47 +267,58 @@ async def _quiz_batch(
     client: AsyncOpenAI,
     role: str,
     level: str,
-    difficulty: str,
-    topics: list[str],
-    questions_text: str,
-    weak_areas: list[str],
+    batch_topics: list[str],
+    all_topics: list[str],
+    mix: dict[str, int],
+    weak_area: tuple[str, str] | None = None,
+    avoid: list[str] | None = None,
 ) -> list[dict]:
-    prompt = f"""You are an expert in {role} interviews at {level} level.
+    labels = [_topic_label(t) for t in all_topics]
+    topics_text = "\n".join(f"- {_topic_label(t)}: {t}" for t in batch_topics)
+    weak_text = f"""
+WEAK AREA FROM THIS INTERVIEW — the candidate gave a short or weak answer here:
+- {weak_area[0]}
+Make one hard question target this weak area, testing {weak_area[1]}. Use the closest topic from this full list: {', '.join(labels)}.
+""" if weak_area else ""
+    avoid_text = (
+        "\nDO NOT repeat or rephrase any of these existing questions:\n"
+        + "\n".join(f"- {q}" for q in avoid) + "\n"
+    ) if avoid else ""
+    mix_text = ", ".join(f"{n} {d}" for d, n in mix.items() if n)
 
-The candidate just completed an interview covering these topics:
-{questions_text}
+    prompt = f"""You are an expert technical interviewer specialising in {role} at {level} level.
 
-Generate exactly {QUIZ_BATCH_SIZE} multiple choice quiz questions, all at "{difficulty}" difficulty, to test the candidate's knowledge of these topics deeply.
-Focus this set on: {', '.join(topics)}{" — but the weak areas below take priority" if weak_areas and difficulty == "hard" else ""}.
-{_weak_areas_text(weak_areas, difficulty)}
-Rules:
-- Questions must test real understanding, not just memorisation
-- If the candidate struggled on a topic (gave short answers), include more questions on that topic — especially at medium and hard difficulty
-- Give one correct answer and exactly 3 plausible wrong answers
-- Only one answer may be correct
-- Make all four answers similar in length and level of detail, so the correct one doesn't stand out
-- Be specific to {role} at {level} level
-- The explanation says why the correct answer is right and why the wrong answers are wrong,
-  referring to them by what they say (answers are shuffled before display)"""
+Write {sum(mix.values())} multiple choice questions for a {level}-level {role} candidate: {mix_text}.
+
+TOPICS FOR THIS SET (cover each of them):
+{topics_text}
+{weak_text}{avoid_text}
+STRICT RULES:
+1. Every question must be SPECIFIC to {role} — name the real APIs, libraries, tools and behaviours a {role} works with. No generic software engineering questions unless directly relevant to {role}
+2. No duplicates — each question tests something different
+3. "topic" must be the topic's short name from the list above
+4. Give one unambiguously correct answer and exactly 3 plausible wrong answers that someone who knows {role} might pick
+5. Make all four answers similar in length and level of detail, so the correct one doesn't stand out
+6. The explanation says why the correct answer is right and why the wrong answers are wrong, referring to them by what they say (answers are shuffled before display)"""
 
     for attempt in range(2):
         try:
             response = await client.chat.completions.create(
                 model=settings.openai_model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
+                temperature=0.5,
                 max_tokens=3000,
-                response_format=QUIZ_SCHEMA,
+                response_format=_quiz_schema(labels),
             )
             content = response.choices[0].message.content
             if not content:
                 raise ValueError(f"no content (refusal: {response.choices[0].message.refusal!r})")
             items = [q for q in map(_to_quiz_item, json.loads(content)["questions"]) if q]
             if items:
-                return items[:QUIZ_BATCH_SIZE]
+                return items
             raise ValueError("no valid questions in batch")
         except Exception:
-            logger.exception("Quiz batch (%s) failed, attempt %d", difficulty, attempt + 1)
+            logger.exception("Quiz batch failed (%s), attempt %d", ", ".join(map(_topic_label, batch_topics)), attempt + 1)
     return []
 
 
@@ -172,35 +329,56 @@ async def generate_quiz(
     transcript: list[dict] | None = None,
 ) -> list[dict]:
     """
-    Generate 25 multiple choice quiz questions
-    based on the interview questions and
-    ideal answers.
+    Generate 25 role-specific multiple choice questions covering every topic in
+    ROLE_TOPICS for the role, with hard questions aimed at weak answers from the
+    interview transcript.
     """
     client = AsyncOpenAI(api_key=settings.openai_api_key)
 
-    questions_text = "\n".join([
-        f"- {q['question']} (topic: {q.get('topic', '')})"
-        for q in questions
-    ])
-    # Give each batch its own share of the topics so batches don't repeat each other
-    topics = list(dict.fromkeys(q.get("topic", "") for q in questions if q.get("topic"))) or [role]
-    batch_topics = [
-        [t for j, t in enumerate(topics) if j % len(QUIZ_BATCHES) == i] or topics
-        for i in range(len(QUIZ_BATCHES))
-    ]
-
+    topics = ROLE_TOPICS.get(role, DEFAULT_TOPICS)
     weak_areas = find_weak_areas(transcript)
 
+    # Split the topics across the batches so every topic is covered and
+    # parallel batches never write about the same thing
+    batch_topics = [topics[i::QUIZ_BATCHES] for i in range(QUIZ_BATCHES)]
+    # Exactly WEAK_AREA_QUESTIONS batches aim their hard question at a weak area,
+    # each from a different angle — giving every batch the same weak area
+    # produced near-identical questions
+    assignments = [
+        (weak_areas[i % len(weak_areas)], WEAK_AREA_ANGLES[i]) if weak_areas and i < WEAK_AREA_QUESTIONS else None
+        for i in range(QUIZ_BATCHES)
+    ]
     batches = await asyncio.gather(*[
-        _quiz_batch(client, role, level, difficulty, batch_topics[i], questions_text, weak_areas)
-        for i, difficulty in enumerate(QUIZ_BATCHES)
+        _quiz_batch(client, role, level, bt, topics, BATCH_MIX, assignments[i])
+        for i, bt in enumerate(batch_topics) if bt
     ])
-    questions_list = [q for batch in batches for q in batch]
 
-    if len(questions_list) < QUIZ_MIN:
-        raise ValueError(f"Only got {len(questions_list)} quiz questions")
+    # Deduplicate by question text
+    seen: list[set[str]] = []
+    unique = [q for batch in batches for q in batch if not _is_duplicate(q["question"], role, seen)]
 
-    return questions_list[:QUIZ_SIZE]
+    # Top up anything lost to duplicates or short batches — the missing
+    # difficulties, on the least-covered topics, avoiding existing questions
+    missing = QUIZ_SIZE - len(unique)
+    if missing > 0:
+        have = {d: sum(q["difficulty"] == d for q in unique) for d in BATCH_MIX}
+        want = {d: n * QUIZ_BATCHES for d, n in BATCH_MIX.items()}
+        mix = {d: max(0, want[d] - have[d]) for d in BATCH_MIX}
+        while sum(mix.values()) > missing:
+            mix["medium" if mix["medium"] else max(mix, key=mix.get)] -= 1
+        while sum(mix.values()) < missing:
+            mix["medium"] += 1
+        counts = {_topic_label(t): sum(q["topic"] == _topic_label(t) for q in unique) for t in topics}
+        least = sorted(topics, key=lambda t: counts[_topic_label(t)])[:max(2, missing)]
+        extra = await _quiz_batch(
+            client, role, level, least, topics, mix, avoid=[q["question"] for q in unique],
+        )
+        unique += [q for q in extra if not _is_duplicate(q["question"], role, seen)]
+
+    if len(unique) < QUIZ_MIN:
+        raise ValueError(f"Only got {len(unique)} unique questions")
+
+    return unique[:QUIZ_SIZE]
 
 
 async def generate_flashcards(

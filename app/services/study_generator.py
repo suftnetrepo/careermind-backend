@@ -16,6 +16,42 @@ QUIZ_BATCH_SIZE = 5
 # returned 8 and 24 in testing); batches of 5 come back complete in ~10s.
 QUIZ_BATCHES = ["easy", "medium", "medium", "medium", "hard"]
 OPTION_IDS = ["a", "b", "c", "d"]
+SHORT_ANSWER_WORDS = 15
+MAX_WEAK_AREAS = 5
+
+
+def find_weak_areas(transcript: list[dict] | None) -> list[str]:
+    """Short answers suggest the candidate struggled. Each one is paired with the
+    question Alex asked, so the quiz knows which topic to target. The reply to
+    Alex's opening greeting ("Yes, I'm ready") is skipped — it's always short."""
+    weak_areas = []
+    last_alex = None
+    alex_turns = 0
+    for line in transcript or []:
+        text = (line.get("text") or "").strip()
+        if line.get("role") == "alex":
+            last_alex = text
+            alex_turns += 1
+        elif line.get("role") == "user" and text and alex_turns > 1:
+            if len(text.split()) < SHORT_ANSWER_WORDS:
+                weak_areas.append(f"Asked: '{last_alex}' — gave a very short answer: '{text}'")
+    return weak_areas[:MAX_WEAK_AREAS]
+
+
+def _weak_areas_text(weak_areas: list[str], difficulty: str) -> str:
+    if not weak_areas:
+        return ""
+    # Each batch has one difficulty, so the targeting instruction depends on it
+    instruction = {
+        "hard":   "At least 3 of these 5 hard questions must target these weak areas.",
+        "medium": "Include questions on these weak areas in this set.",
+    }.get(difficulty, "")
+    return f"""
+CANDIDATE WEAK AREAS (from transcript):
+The candidate gave short or weak answers here:
+{chr(10).join(f'- {w}' for w in weak_areas)}
+{instruction}
+"""
 
 
 def _schema(name: str, items_key: str, item_properties: dict) -> dict:
@@ -88,6 +124,7 @@ async def _quiz_batch(
     difficulty: str,
     topics: list[str],
     questions_text: str,
+    weak_areas: list[str],
 ) -> list[dict]:
     prompt = f"""You are an expert in {role} interviews at {level} level.
 
@@ -95,10 +132,11 @@ The candidate just completed an interview covering these topics:
 {questions_text}
 
 Generate exactly {QUIZ_BATCH_SIZE} multiple choice quiz questions, all at "{difficulty}" difficulty, to test the candidate's knowledge of these topics deeply.
-Focus this set on: {', '.join(topics)}.
-
+Focus this set on: {', '.join(topics)}{" — but the weak areas below take priority" if weak_areas and difficulty == "hard" else ""}.
+{_weak_areas_text(weak_areas, difficulty)}
 Rules:
 - Questions must test real understanding, not just memorisation
+- If the candidate struggled on a topic (gave short answers), include more questions on that topic — especially at medium and hard difficulty
 - Give one correct answer and exactly 3 plausible wrong answers
 - Only one answer may be correct
 - Make all four answers similar in length and level of detail, so the correct one doesn't stand out
@@ -151,8 +189,10 @@ async def generate_quiz(
         for i in range(len(QUIZ_BATCHES))
     ]
 
+    weak_areas = find_weak_areas(transcript)
+
     batches = await asyncio.gather(*[
-        _quiz_batch(client, role, level, difficulty, batch_topics[i], questions_text)
+        _quiz_batch(client, role, level, difficulty, batch_topics[i], questions_text, weak_areas)
         for i, difficulty in enumerate(QUIZ_BATCHES)
     ])
     questions_list = [q for batch in batches for q in batch]

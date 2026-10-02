@@ -51,6 +51,7 @@ class InterviewSession(Base):
     level            = Column(String, nullable=False)
     focus            = Column(String, nullable=False)
     duration_minutes = Column(Integer, default=15)
+    voice            = Column(String, default="alloy")   # Realtime API voice for Alex
     job_description  = Column(Text, nullable=True)
 
     # Generated content

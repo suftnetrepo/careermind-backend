@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 REALTIME_TOKEN_TTL_SECONDS = 60
+# Voices the Realtime API accepts (TTS-only voices like onyx/nova are rejected)
+REALTIME_VOICES = ("alloy", "ash", "coral", "echo", "marin", "cedar")
+DEFAULT_VOICE = "alloy"
 COACHING_TAGS = ("positive", "tip", "pitfall")
 
 
@@ -83,6 +86,7 @@ class SetupRequest(BaseModel):
     focus:            str
     duration_minutes: int = 15
     job_description:  Optional[str] = None
+    voice:            str = DEFAULT_VOICE
 
 
 class StartRequest(BaseModel):
@@ -112,6 +116,8 @@ async def setup_interview(
     A user's first interview is free (15 minutes) and pre-paid; every later
     interview stays unpaid until Stripe checkout completes.
     """
+    if req.voice not in REALTIME_VOICES:
+        raise HTTPException(400, f"Voice must be one of: {', '.join(REALTIME_VOICES)}")
     if not user.has_free_interview and not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
         raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
 
@@ -130,6 +136,7 @@ async def setup_interview(
         focus=req.focus,
         duration_minutes=req.duration_minutes,
         job_description=req.job_description,
+        voice=req.voice,
         questions_json=json.dumps(questions),
         status=InterviewStatus.setup,
         paid=False,
@@ -160,6 +167,7 @@ async def setup_interview(
         "level":        req.level,
         "focus":        req.focus,
         "duration_minutes": session.duration_minutes,
+        "voice":            session.voice,
         "is_free":          session.is_free,
         "paid":             session.paid,
         "amount_pence":     session.amount_pence,
@@ -254,7 +262,7 @@ async def get_realtime_token(
                         },
                         "output": {
                             "format": {"type": "audio/pcm", "rate": 24000},
-                            "voice":  "alloy",
+                            "voice":  interview.voice or DEFAULT_VOICE,
                         },
                     },
                 },
@@ -412,6 +420,7 @@ async def get_interview(
         "focus":            session.focus,
         "duration_minutes": session.duration_minutes,
         "job_description":  session.job_description,
+        "voice":            session.voice,
         "questions":        json.loads(session.questions_json) if session.questions_json else [],
         "status":           session.status,
         "paid":             session.paid,

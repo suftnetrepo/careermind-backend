@@ -10,7 +10,7 @@ settings = get_settings()
 
 ROLES = {
     "AI Engineer":           "LLMs, RAG pipelines, vector search, MLOps, Python, OpenAI, LangChain",
-    "Python Developer":      "Python, FastAPI, Django, REST APIs, async, testing, databases",
+    "Python Developer":      "Python, FastAPI, Django, REST APIs, async programming, testing, data structures, algorithms",
     "Full Stack Developer":  "React, Node.js, Next.js, TypeScript, PostgreSQL, REST APIs",
     "Data Scientist":        "Python, pandas, scikit-learn, ML models, statistics, visualisation",
     "Product Manager":       "roadmaps, prioritisation, metrics, stakeholder management, Agile",

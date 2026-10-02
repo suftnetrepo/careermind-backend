@@ -9,6 +9,8 @@ from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
+from app.services.study_generator import generate_quiz, generate_flashcards
+from datetime import datetime, timezone
 from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
 import asyncio
 import httpx
@@ -486,6 +488,109 @@ async def get_history(
         }
         for s in sessions
     ]
+
+
+@router.post("/{interview_id}/study-materials")
+async def generate_study_materials(
+    interview_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate quiz and flashcards from
+    completed interview. Cached — only
+    generates once per interview.
+    """
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.user_id == user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(404, "Interview not found")
+    if interview.status != InterviewStatus.completed:
+        raise HTTPException(
+            400,
+            "Interview must be completed before generating study materials",
+        )
+
+    # Return cached if already generated
+    if interview.quiz_json and interview.flashcards_json:
+        return {
+            "quiz":       json.loads(interview.quiz_json),
+            "flashcards": json.loads(interview.flashcards_json),
+            "cached":     True,
+        }
+
+    questions = json.loads(interview.questions_json or "[]")
+    transcript = json.loads(interview.transcript_json or "[]")
+
+    # Generate both in parallel
+    try:
+        quiz, flashcards = await asyncio.gather(
+            generate_quiz(
+                role=interview.role,
+                level=interview.level,
+                questions=questions,
+                transcript=transcript,
+            ),
+            generate_flashcards(
+                role=interview.role,
+                level=interview.level,
+                questions=questions,
+                cv_text=interview.cv_text,
+            ),
+        )
+    except Exception:
+        logger.exception("Study material generation failed for %s", interview_id)
+        raise HTTPException(502, "Could not generate study materials. Please try again.")
+
+    # Cache results
+    interview.quiz_json = json.dumps(quiz)
+    interview.flashcards_json = json.dumps(flashcards)
+    interview.study_generated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    return {
+        "quiz":       quiz,
+        "flashcards": flashcards,
+        "cached":     False,
+    }
+
+
+@router.get("/{interview_id}/study-materials")
+async def get_study_materials(
+    interview_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.user_id == user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(404, "Interview not found")
+    if not interview.quiz_json:
+        return {
+            "quiz":       None,
+            "flashcards": None,
+            "cached":     False,
+        }
+    return {
+        "quiz":       json.loads(interview.quiz_json),
+        "flashcards": json.loads(interview.flashcards_json or "[]"),
+        "cached":     True,
+        "generated_at": (
+            interview.study_generated_at.isoformat()
+            if interview.study_generated_at
+            else None
+        ),
+    }
 
 
 @router.get("/{interview_id}")

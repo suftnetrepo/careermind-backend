@@ -78,4 +78,9 @@ class InterviewSession(Base):
     feedback_json    = Column(Text, nullable=True)
     overall_score    = Column(Integer, nullable=True)
 
+    # Study materials (generated once after the interview, then cached)
+    quiz_json          = Column(Text, nullable=True)
+    flashcards_json    = Column(Text, nullable=True)
+    study_generated_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at       = Column(DateTime(timezone=True), server_default=func.now())

@@ -3,34 +3,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from app.db.engine import get_db
-from app.db.models import User, SessionPack, PackStatus
+from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 import stripe
 import uuid
-from datetime import datetime, timezone
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 settings = get_settings()
 
-PACKS = {
-    "1":  {"sessions": 1,  "amount_pence": 299,  "label": "1 session"},
-    "5":  {"sessions": 5,  "amount_pence": 1199, "label": "5 sessions"},
-    "10": {"sessions": 10, "amount_pence": 1999, "label": "10 sessions"},
-}
+RATE_PENCE_PER_MINUTE = 20   # £0.20 per minute
+MIN_MINUTES = 10
+MAX_MINUTES = 60
 
 
 class CreateCheckoutRequest(BaseModel):
-    pack: str   # "1", "5", or "10"
-
-
-@router.get("/balance")
-async def get_balance(user: User = Depends(get_current_user)):
-    return {
-        "sessions_remaining": user.sessions_remaining,
-        "free_sessions":      user.free_sessions,
-        "paid_sessions":      user.paid_sessions,
-    }
+    interview_id:     str
+    duration_minutes: int
 
 
 @router.post("/checkout")
@@ -39,60 +28,73 @@ async def create_checkout(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if req.pack not in PACKS:
-        raise HTTPException(400, "Invalid pack. Choose 1, 5, or 10.")
+    if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
+        raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
 
-    pack_info = PACKS[req.pack]
+    # Verify interview belongs to user and is in setup state
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == uuid.UUID(req.interview_id),
+            InterviewSession.user_id == user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(404, "Interview not found")
+    if interview.status != InterviewStatus.setup:
+        raise HTTPException(400, "Interview already started or completed")
+    if interview.paid:
+        raise HTTPException(400, "Interview already paid")
+
+    amount_pence = req.duration_minutes * RATE_PENCE_PER_MINUTE
+    amount_pounds = f"£{amount_pence / 100:.2f}"
 
     if not settings.stripe_secret_key:
         raise HTTPException(503, "Payment system not configured")
 
     stripe.api_key = settings.stripe_secret_key
 
-    # Create pending pack record
-    pack = SessionPack(
-        id=uuid.uuid4(),
-        user_id=user.id,
-        sessions_count=pack_info["sessions"],
-        amount_pence=pack_info["amount_pence"],
-        currency="gbp",
-        status=PackStatus.pending,
-    )
-    db.add(pack)
-    await db.commit()
-
-    # Create Stripe checkout session
     checkout = stripe.checkout.Session.create(
         payment_method_types=["card"],
         line_items=[{
             "price_data": {
                 "currency":     "gbp",
-                "unit_amount":  pack_info["amount_pence"],
-                "product_data": {"name": f"CareerMind — {pack_info['label']}"},
+                "unit_amount":  amount_pence,
+                "product_data": {
+                    "name":        f"CareerMind — {req.duration_minutes} minute interview",
+                    "description": f"{req.duration_minutes} minutes · {interview.role} · {interview.level}",
+                },
             },
             "quantity": 1,
         }],
         mode="payment",
-        success_url=f"{settings.frontend_url}/dashboard?payment=success",
-        cancel_url=f"{settings.frontend_url}/buy-sessions?payment=cancelled",
+        success_url=f"{settings.frontend_url}/interview?id={req.interview_id}&payment=success",
+        cancel_url=f"{settings.frontend_url}/preview?id={req.interview_id}&payment=cancelled",
         metadata={
-            "pack_id":  str(pack.id),
-            "user_id":  str(user.id),
-            "sessions": str(pack_info["sessions"]),
+            "interview_id":     req.interview_id,
+            "user_id":          str(user.id),
+            "duration_minutes": str(req.duration_minutes),
+            "amount_pence":     str(amount_pence),
         },
         customer_email=user.email,
     )
 
-    # Save stripe session id
-    pack.stripe_session_id = checkout.id
+    # Save stripe session id on interview
+    interview.stripe_session_id = checkout.id
+    interview.amount_pence      = amount_pence
     await db.commit()
 
-    return {"checkout_url": checkout.url, "pack_id": str(pack.id)}
+    return {
+        "checkout_url":     checkout.url,
+        "amount_pence":     amount_pence,
+        "amount_display":   amount_pounds,
+        "duration_minutes": req.duration_minutes,
+    }
 
 
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
-    payload = await request.body()
+    payload    = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 
     if not settings.stripe_webhook_secret:
@@ -109,32 +111,40 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        meta = session.get("metadata", {})
-        pack_id = meta.get("pack_id")
-        sessions_count = int(meta.get("sessions", 0))
-        user_id = meta.get("user_id")
+        meta    = session.get("metadata", {})
+        interview_id     = meta.get("interview_id")
+        duration_minutes = int(meta.get("duration_minutes", 0))
+        amount_pence     = int(meta.get("amount_pence", 0))
 
-        if pack_id and user_id and sessions_count:
-            # Update pack status
+        if interview_id and session.get("payment_status") == "paid":
             result = await db.execute(
-                select(SessionPack).where(
-                    SessionPack.id == uuid.UUID(pack_id)
+                select(InterviewSession).where(
+                    InterviewSession.id == uuid.UUID(interview_id)
                 )
             )
-            pack = result.scalar_one_or_none()
-            if pack and pack.status == PackStatus.pending:
-                pack.status = PackStatus.completed
-                pack.stripe_payment_intent = session.get("payment_intent")
-                pack.completed_at = datetime.now(timezone.utc)
-
-                # Credit the user
-                user_result = await db.execute(
-                    select(User).where(User.id == uuid.UUID(user_id))
-                )
-                user = user_result.scalar_one_or_none()
-                if user:
-                    user.paid_sessions += sessions_count
-
+            interview = result.scalar_one_or_none()
+            if interview and not interview.paid:
+                interview.paid                  = True
+                interview.duration_minutes      = duration_minutes
+                interview.amount_pence          = amount_pence
+                interview.stripe_payment_intent = session.get("payment_intent")
                 await db.commit()
 
     return {"received": True}
+
+
+@router.get("/pricing")
+async def get_pricing():
+    """Return pricing info for the frontend slider."""
+    return {
+        "rate_pence_per_minute": RATE_PENCE_PER_MINUTE,
+        "min_minutes":           MIN_MINUTES,
+        "max_minutes":           MAX_MINUTES,
+        "examples": [
+            {"minutes": 10, "pence": 200,  "display": "£2.00"},
+            {"minutes": 15, "pence": 300,  "display": "£3.00"},
+            {"minutes": 20, "pence": 400,  "display": "£4.00"},
+            {"minutes": 30, "pence": 600,  "display": "£6.00"},
+            {"minutes": 60, "pence": 1200, "display": "£12.00"},
+        ],
+    }

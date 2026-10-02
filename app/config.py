@@ -19,9 +19,6 @@ class Settings(BaseSettings):
 
     stripe_secret_key: str = Field(default="", env="STRIPE_SECRET_KEY")
     stripe_webhook_secret: str = Field(default="", env="STRIPE_WEBHOOK_SECRET")
-    stripe_price_1_session: str = Field(default="", env="STRIPE_PRICE_1_SESSION")
-    stripe_price_5_sessions: str = Field(default="", env="STRIPE_PRICE_5_SESSIONS")
-    stripe_price_10_sessions: str = Field(default="", env="STRIPE_PRICE_10_SESSIONS")
 
     frontend_url: str = Field(default="http://localhost:3000", env="FRONTEND_URL")
     api_url: str = Field(default="http://localhost:8000", env="API_URL")

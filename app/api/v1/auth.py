@@ -49,7 +49,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=req.email.lower(),
         name=req.name.strip(),
         hashed_password=hash_password(req.password),
-        free_sessions=1,
+        free_minutes=15,
     )
     db.add(user)
     await db.commit()
@@ -99,8 +99,7 @@ async def me(user: User = Depends(get_current_user)):
         "id":                 str(user.id),
         "name":               user.name,
         "email":              user.email,
-        "sessions_remaining": user.sessions_remaining,
-        "free_sessions":      user.free_sessions,
-        "paid_sessions":      user.paid_sessions,
+        "has_free_interview": user.has_free_interview,
+        "free_minutes":       user.free_minutes,
         "created_at":         user.created_at.isoformat() if user.created_at else None,
     }

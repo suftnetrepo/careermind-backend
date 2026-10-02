@@ -14,12 +14,6 @@ class UserStatus(str, enum.Enum):
     suspended = "suspended"
 
 
-class PackStatus(str, enum.Enum):
-    pending   = "pending"
-    completed = "completed"
-    refunded  = "refunded"
-
-
 class InterviewStatus(str, enum.Enum):
     setup     = "setup"
     active    = "active"
@@ -35,31 +29,14 @@ class User(Base):
     name            = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
     status          = Column(SAEnum(UserStatus), default=UserStatus.active)
-    free_sessions   = Column(Integer, default=1)   # 1 free on signup
-    paid_sessions   = Column(Integer, default=0)
+    free_minutes    = Column(Integer, default=15)  # one free interview on signup
     email_verified  = Column(Boolean, default=False)
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     updated_at      = Column(DateTime(timezone=True), onupdate=func.now())
 
     @property
-    def sessions_remaining(self) -> int:
-        return self.free_sessions + self.paid_sessions
-
-
-class SessionPack(Base):
-    """A Stripe purchase of session credits."""
-    __tablename__ = "session_packs"
-
-    id                    = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id               = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
-    stripe_session_id     = Column(String, nullable=True)
-    stripe_payment_intent = Column(String, nullable=True)
-    sessions_count        = Column(Integer, nullable=False)
-    amount_pence          = Column(Integer, nullable=False)
-    currency              = Column(String, default="gbp")
-    status                = Column(SAEnum(PackStatus), default=PackStatus.pending)
-    created_at            = Column(DateTime(timezone=True), server_default=func.now())
-    completed_at          = Column(DateTime(timezone=True), nullable=True)
+    def has_free_interview(self) -> bool:
+        return self.free_minutes > 0
 
 
 class InterviewSession(Base):
@@ -84,6 +61,13 @@ class InterviewSession(Base):
     started_at       = Column(DateTime(timezone=True), nullable=True)
     ended_at         = Column(DateTime(timezone=True), nullable=True)
     duration_seconds = Column(Integer, nullable=True)
+
+    # Billing
+    paid                  = Column(Boolean, default=False)
+    is_free               = Column(Boolean, default=False)
+    amount_pence          = Column(Integer, nullable=True)
+    stripe_session_id     = Column(String, nullable=True)
+    stripe_payment_intent = Column(String, nullable=True)
 
     # Results
     transcript_json  = Column(Text, nullable=True)

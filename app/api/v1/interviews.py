@@ -1,16 +1,19 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, update
 from pydantic import BaseModel
 from typing import Optional, List
 from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.services.question_generator import generate_questions
+from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES
 import uuid
 import json
 
 router = APIRouter(prefix="/interviews", tags=["Interviews"])
+
+FREE_INTERVIEW_MINUTES = 15
 
 
 class SetupRequest(BaseModel):
@@ -37,9 +40,13 @@ async def setup_interview(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate questions and create a pending interview session."""
-    if user.sessions_remaining < 1:
-        raise HTTPException(402, "No sessions remaining. Please buy more.")
+    """Generate questions and create a pending interview session.
+
+    A user's first interview is free (15 minutes) and pre-paid; every later
+    interview stays unpaid until Stripe checkout completes.
+    """
+    if not user.has_free_interview and not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
+        raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
 
     questions = await generate_questions(
         role=req.role,
@@ -58,7 +65,24 @@ async def setup_interview(
         job_description=req.job_description,
         questions_json=json.dumps(questions),
         status=InterviewStatus.setup,
+        paid=False,
+        is_free=False,
     )
+
+    # Claim the free interview atomically so concurrent setups can't both use it
+    claimed = await db.execute(
+        update(User)
+        .where(User.id == user.id, User.free_minutes > 0)
+        .values(free_minutes=0)
+        .returning(User.id)
+    )
+    if claimed.scalar_one_or_none():
+        session.is_free          = True
+        session.paid             = True
+        session.duration_minutes = FREE_INTERVIEW_MINUTES
+    else:
+        session.amount_pence = session.duration_minutes * RATE_PENCE_PER_MINUTE
+
     db.add(session)
     await db.commit()
 
@@ -68,7 +92,10 @@ async def setup_interview(
         "role":         req.role,
         "level":        req.level,
         "focus":        req.focus,
-        "duration_minutes": req.duration_minutes,
+        "duration_minutes": session.duration_minutes,
+        "is_free":          session.is_free,
+        "paid":             session.paid,
+        "amount_pence":     session.amount_pence,
     }
 
 
@@ -78,7 +105,7 @@ async def start_interview(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Mark interview as active and deduct a session credit."""
+    """Mark interview as active. Requires the interview to be paid (or free)."""
     result = await db.execute(
         select(InterviewSession).where(
             InterviewSession.id == uuid.UUID(req.interview_id),
@@ -91,13 +118,8 @@ async def start_interview(
     if session.status != InterviewStatus.setup:
         raise HTTPException(400, "Interview already started or completed")
 
-    # Deduct credit — free first, then paid
-    if user.free_sessions > 0:
-        user.free_sessions -= 1
-    elif user.paid_sessions > 0:
-        user.paid_sessions -= 1
-    else:
-        raise HTTPException(402, "No sessions remaining")
+    if not session.paid:
+        raise HTTPException(402, "Payment required before starting")
 
     from datetime import datetime, timezone
     session.status = InterviewStatus.active
@@ -189,6 +211,10 @@ async def get_interview(
         "job_description":  session.job_description,
         "questions":        json.loads(session.questions_json) if session.questions_json else [],
         "status":           session.status,
+        "paid":             session.paid,
+        "is_free":          session.is_free,
+        "amount_pence":     session.amount_pence,
+        "stripe_payment_intent": session.stripe_payment_intent,
         "overall_score":    session.overall_score,
         "feedback":         json.loads(session.feedback_json) if session.feedback_json else None,
         "transcript":       json.loads(session.transcript_json) if session.transcript_json else None,

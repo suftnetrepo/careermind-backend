@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="", env="OPENAI_API_KEY")
     openai_model: str = "gpt-4o"
+    openai_realtime_model: str = Field(default="gpt-realtime", env="OPENAI_REALTIME_MODEL")
 
     stripe_secret_key: str = Field(default="", env="STRIPE_SECRET_KEY")
     stripe_webhook_secret: str = Field(default="", env="STRIPE_WEBHOOK_SECRET")

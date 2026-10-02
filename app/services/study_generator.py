@@ -252,3 +252,147 @@ CANDIDATE CV:
     if not flashcards:
         raise ValueError("no flashcards returned")
     return flashcards
+
+
+FEEDBACK_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "interview_feedback",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "overall_score":       {"type": "integer"},
+                "technical_score":     {"type": "integer"},
+                "communication_score": {"type": "integer"},
+                "examples_score":      {"type": "integer"},
+                "structure_score":     {"type": "integer"},
+                "strengths":           {"type": "array", "items": {"type": "string"}},
+                "improvements":        {"type": "array", "items": {"type": "string"}},
+                "recommended_focus":   {"type": "string"},
+                "questions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "topic":       {"type": "string"},
+                            # Quoting first makes coverage decisions consistent run to run
+                            "evidence":    {"type": "string"},
+                            "covered":     {"type": "boolean"},
+                            "score":       {"type": "integer"},
+                            "feedback":    {"type": "string"},
+                            "improvement": {"type": "string"},
+                        },
+                        "required": ["topic", "evidence", "covered", "score", "feedback", "improvement"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "overall_score", "technical_score", "communication_score", "examples_score",
+                "structure_score", "strengths", "improvements", "recommended_focus", "questions",
+            ],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def no_answers_feedback(questions: list[dict]) -> dict:
+    """Feedback for an interview where the candidate never answered — no model call needed."""
+    return {
+        "overall_score": 0, "technical_score": 0, "communication_score": 0,
+        "examples_score": 0, "structure_score": 0,
+        "strengths": [],
+        "improvements": ["No answers were recorded — check your microphone and try another interview."],
+        "recommended_focus": "Complete an interview with spoken answers to get a score.",
+        "questions": [
+            {"topic": q.get("topic", ""), "evidence": "", "covered": False, "score": 0,
+             "feedback": "Not reached in this interview.", "improvement": ""}
+            for q in questions
+        ],
+    }
+
+
+async def generate_feedback(
+    role: str,
+    level: str,
+    questions: list[dict],
+    transcript: list[dict],
+) -> dict:
+    """
+    Score the candidate's interview answers
+    using GPT-4o. Returns structured feedback
+    with per-question scores and overall
+    dimension scores.
+    """
+    if not any(t.get("role") == "user" and (t.get("text") or "").strip() for t in transcript):
+        return no_answers_feedback(questions)
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+
+    # Alex rephrases, reorders and adds follow-ups, so answers can't be matched to
+    # planned questions by position — give the model the whole conversation
+    plan_text = "\n\n".join(
+        f"Question {i + 1}: {q.get('question', '')}\n"
+        f"Topic: {q.get('topic', '')}\n"
+        f"Type: {q.get('type', '')}\n"
+        f"Expected keywords: {', '.join(q.get('ideal_keywords', []))}"
+        for i, q in enumerate(questions)
+    )
+    conversation_text = "\n".join(
+        f"{'Interviewer' if t.get('role') == 'alex' else 'Candidate'}: {t.get('text', '')}"
+        for t in transcript
+    )
+
+    prompt = f"""You are an expert interviewer scoring a {level}-level {role} interview.
+
+Score each answer honestly and specifically. Be fair but rigorous — this feedback will help the candidate improve.
+
+PLANNED QUESTIONS (the interviewer worked through these, rephrasing them in conversation):
+{plan_text}
+
+FULL INTERVIEW TRANSCRIPT, IN ORDER:
+{conversation_text}
+
+Scoring guide:
+90-100: Exceptional — clear, specific, with strong examples
+75-89:  Strong — good understanding, minor gaps
+60-74:  Adequate — basic understanding, lacks depth or examples
+40-59:  Weak — vague or incomplete
+0-39:   Poor — wrong, missing or very short answer
+
+Rules:
+- Score based on what they ACTUALLY said, not what they could have said
+- The questions array must have exactly {len(questions)} items, one per planned question, in the same order
+- Match answers to planned questions by meaning, including follow-up answers on the same topic
+- For each question, first fill "evidence": quote the candidate's words that answer it (combine several turns if needed), or "" if they said nothing on it. Check every candidate turn against every question
+- "covered": true if the interviewer asked that question (in any wording) OR the candidate gave an answer on that topic; false only if neither happened
+- Score a volunteered answer on its merits, even if the interviewer didn't formally ask it
+- A question that was asked but not answered, or answered with "I don't know", "not sure" or almost nothing, scores 0-20
+- For a question that was not covered, set score to 0, feedback to "Not reached in this interview." and improvement to ""
+- Do not penalise the dimension or overall scores for questions that were not covered
+- overall_score should roughly match the average score of the covered questions
+- Strengths and improvements must be SPECIFIC to this interview, never generic — reference actual things the candidate said
+- Give 2-3 strengths and 2-3 improvements; if there is genuinely nothing strong, give fewer strengths
+- feedback: 1-2 sentences specific to what they said; improvement: one concrete actionable tip"""
+
+    response = await client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=4000,
+        response_format=FEEDBACK_SCHEMA,
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise ValueError(f"no feedback content (refusal: {response.choices[0].message.refusal!r})")
+    feedback = json.loads(content)
+
+    # Keep the headline score consistent with the per-question scores the user sees
+    covered = [q["score"] for q in feedback["questions"] if q["covered"]]
+    if covered:
+        feedback["overall_score"] = round(sum(covered) / len(covered))
+    for key in ("overall_score", "technical_score", "communication_score", "examples_score", "structure_score"):
+        feedback[key] = max(0, min(100, int(feedback[key])))
+    return feedback

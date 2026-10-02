@@ -4,12 +4,12 @@ from sqlalchemy import select, desc, update
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from openai import AsyncOpenAI
-from app.db.engine import get_db
+from app.db.engine import get_db, AsyncSessionLocal
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
-from app.services.study_generator import generate_quiz, generate_flashcards
+from app.services.study_generator import generate_quiz, generate_flashcards, generate_feedback
 from datetime import datetime, timezone
 from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
 import asyncio
@@ -30,6 +30,48 @@ COACHING_TAGS = ("positive", "tip", "pitfall")
 MAX_CV_BYTES = 5 * 1024 * 1024
 CV_TEXT_LIMIT = 8000
 SETUP_RETRY_DELAY_SECONDS = 2
+FEEDBACK_RETRY_DELAY_SECONDS = 3
+
+# asyncio only keeps weak references to tasks — hold background feedback jobs
+# here so they aren't garbage-collected before they finish
+_feedback_tasks: set[asyncio.Task] = set()
+
+
+async def _generate_and_save_feedback(interview_id: str, role: str, level: str):
+    """
+    Background task — generate and save
+    feedback after interview ends.
+    Does not affect the /end response time.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(InterviewSession).where(InterviewSession.id == uuid.UUID(interview_id))
+            )
+            interview = result.scalar_one_or_none()
+            if not interview:
+                return
+
+            questions = json.loads(interview.questions_json or "[]")
+            transcript = json.loads(interview.transcript_json or "[]")
+
+            for attempt in range(2):
+                try:
+                    feedback = await generate_feedback(
+                        role=role, level=level, questions=questions, transcript=transcript,
+                    )
+                    break
+                except Exception:
+                    if attempt == 1:
+                        raise
+                    logger.warning("Feedback generation failed for %s, retrying", interview_id)
+                    await asyncio.sleep(FEEDBACK_RETRY_DELAY_SECONDS)
+
+            interview.feedback_json = json.dumps(feedback)
+            interview.overall_score = feedback.get("overall_score", 0)
+            await db.commit()
+    except Exception:
+        logger.exception("Feedback generation failed for %s", interview_id)
 
 
 def extract_pdf_text(contents: bytes) -> tuple[str, int]:
@@ -451,14 +493,44 @@ async def end_interview(
     if not session:
         raise HTTPException(404, "Interview session not found")
 
-    from datetime import datetime, timezone
     session.status = InterviewStatus.completed
     session.ended_at = datetime.now(timezone.utc)
     session.duration_seconds = req.duration_seconds
     session.transcript_json = req.transcript_json
+    session.feedback_json = None      # a re-ended interview gets fresh feedback
+    session.overall_score = None
     await db.commit()
 
+    # Score in the background — the page polls /feedback-status until it's ready
+    task = asyncio.create_task(
+        _generate_and_save_feedback(str(session.id), session.role, session.level)
+    )
+    _feedback_tasks.add(task)
+    task.add_done_callback(_feedback_tasks.discard)
+
     return {"status": "completed", "interview_id": str(session.id)}
+
+
+@router.get("/{interview_id}/feedback-status")
+async def get_feedback_status(
+    interview_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.user_id == user.id,
+        )
+    )
+    interview = result.scalar_one_or_none()
+    if not interview:
+        raise HTTPException(404, "Interview not found")
+    return {
+        "ready":    bool(interview.feedback_json),
+        "score":    interview.overall_score,
+        "feedback": json.loads(interview.feedback_json) if interview.feedback_json else None,
+    }
 
 
 @router.get("/history")

@@ -9,7 +9,7 @@ from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
-from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES
+from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
 import httpx
 import logging
 import uuid
@@ -118,8 +118,11 @@ async def setup_interview(
     """
     if req.voice not in REALTIME_VOICES:
         raise HTTPException(400, f"Voice must be one of: {', '.join(REALTIME_VOICES)}")
-    if not user.has_free_interview and not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
-        raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
+    if not user.has_free_interview:
+        if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
+            raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
+        if req.duration_minutes not in ALLOWED_DURATIONS:
+            raise HTTPException(400, f"Duration must be one of: {ALLOWED_DURATIONS}")
 
     questions = await generate_questions(
         role=req.role,

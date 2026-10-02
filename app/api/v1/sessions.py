@@ -13,8 +13,9 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 settings = get_settings()
 
 RATE_PENCE_PER_MINUTE = 20   # £0.20 per minute
-MIN_MINUTES = 10
+MIN_MINUTES = 15
 MAX_MINUTES = 60
+ALLOWED_DURATIONS = [15, 30, 45, 60]
 
 
 class CreateCheckoutRequest(BaseModel):
@@ -30,6 +31,8 @@ async def create_checkout(
 ):
     if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
         raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
+    if req.duration_minutes not in ALLOWED_DURATIONS:
+        raise HTTPException(400, f"Duration must be one of: {ALLOWED_DURATIONS}")
 
     # Verify interview belongs to user and is in setup state
     result = await db.execute(
@@ -141,10 +144,9 @@ async def get_pricing():
         "min_minutes":           MIN_MINUTES,
         "max_minutes":           MAX_MINUTES,
         "examples": [
-            {"minutes": 10, "pence": 200,  "display": "£2.00"},
             {"minutes": 15, "pence": 300,  "display": "£3.00"},
-            {"minutes": 20, "pence": 400,  "display": "£4.00"},
             {"minutes": 30, "pence": 600,  "display": "£6.00"},
+            {"minutes": 45, "pence": 900,  "display": "£9.00"},
             {"minutes": 60, "pence": 1200, "display": "£12.00"},
         ],
     }

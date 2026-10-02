@@ -105,6 +105,7 @@ YOUR QUESTIONS (work through these naturally):
 - If an answer is vague, ask for a specific example
 - Keep your speaking turns SHORT — under 30 seconds
 - This must feel like a real human interview
+- For coding questions, speak the code clearly line by line. Start each code block by saying "here is the code:" and end with "end of code". This helps the candidate follow along.
 """
 
 

@@ -1,4 +1,6 @@
+from fastapi import HTTPException
 from openai import AsyncOpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential
 from app.config import get_settings
 import json
 
@@ -16,6 +18,26 @@ ROLES = {
     "JavaScript Developer":  "JavaScript, TypeScript, React, Node.js, browser APIs, testing",
     "Project Manager":       "delivery, risk management, stakeholder communication, Agile, budgets",
 }
+
+
+@retry(
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=2, max=6),
+    reraise=False,
+)
+async def _call_openai(client, model, messages):
+    response = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.7,
+        max_tokens=2000,
+        response_format={"type": "json_object"},
+    )
+    # OpenAI occasionally returns a completion with no content — treat it as a
+    # failure so it gets retried rather than crashing in json.loads
+    if not response.choices[0].message.content:
+        raise ValueError("OpenAI returned empty content")
+    return response
 
 
 async def generate_questions(
@@ -68,16 +90,16 @@ Return ONLY a valid JSON array. Each question must have:
 Make the questions realistic, specific to the level, and varied in difficulty.
 Return only the JSON array, no other text."""
 
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.7,
-        max_tokens=2000,
-        response_format={"type": "json_object"},
-    )
-
-    raw = response.choices[0].message.content
-    parsed = json.loads(raw)
+    try:
+        response = await _call_openai(
+            client, settings.openai_model, [{"role": "user", "content": prompt}]
+        )
+        parsed = json.loads(response.choices[0].message.content)
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Question generation failed. Please try again.",
+        )
 
     # Handle if GPT wraps in an object
     if isinstance(parsed, dict):
@@ -86,4 +108,10 @@ Return only the JSON array, no other text."""
                 parsed = parsed[key]
                 break
 
-    return parsed if isinstance(parsed, list) else []
+    if not isinstance(parsed, list) or len(parsed) == 0:
+        raise HTTPException(
+            status_code=502,
+            detail="Question generation returned empty. Please try again.",
+        )
+
+    return parsed

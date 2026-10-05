@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from app.core.rate_limit import (
+    limiter, SETUP_LIMIT, UPLOAD_CV_LIMIT, REALTIME_TOKEN_LIMIT, COACHING_LIMIT, STUDY_LIMIT,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, update
 from pydantic import BaseModel, Field
@@ -10,7 +13,7 @@ from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
 from app.services.study_generator import generate_quiz, generate_flashcards, generate_feedback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
 import asyncio
 import httpx
@@ -23,6 +26,9 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 REALTIME_TOKEN_TTL_SECONDS = 60
+# The interview timer runs in the browser, so the server stops issuing voice
+# sessions once the paid time (plus room for connecting/reconnecting) is used
+REALTIME_GRACE_MINUTES = 5
 # Voices the Realtime API accepts (TTS-only voices like onyx/nova are rejected)
 REALTIME_VOICES = ("alloy", "ash", "coral", "echo", "marin", "cedar")
 DEFAULT_VOICE = "alloy"
@@ -199,7 +205,9 @@ class EndRequest(BaseModel):
 
 
 @router.post("/setup")
+@limiter.limit(SETUP_LIMIT)
 async def setup_interview(
+    request: Request,
     req: SetupRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -211,6 +219,10 @@ async def setup_interview(
     """
     if req.voice not in REALTIME_VOICES:
         raise HTTPException(400, f"Voice must be one of: {', '.join(REALTIME_VOICES)}")
+    # The free interview is the obvious target for throwaway sign-ups — it needs
+    # a confirmed email address. Paid interviews go through Stripe instead.
+    if user.has_free_interview and not user.email_verified:
+        raise HTTPException(403, "Confirm your email address to use your free interview — check your inbox for the link.")
     if not user.has_free_interview:
         if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
             raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
@@ -287,7 +299,9 @@ async def setup_interview(
 
 
 @router.post("/upload-cv")
+@limiter.limit(UPLOAD_CV_LIMIT)
 async def upload_cv(
+    request: Request,
     file: UploadFile = File(...),
     user: User = Depends(get_current_user),
 ):
@@ -345,7 +359,9 @@ async def start_interview(
 
 
 @router.post("/realtime-token")
+@limiter.limit(REALTIME_TOKEN_LIMIT)
 async def get_realtime_token(
+    request: Request,
     interview_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -364,6 +380,12 @@ async def get_realtime_token(
         raise HTTPException(400, "Interview is not active")
     if not interview.paid and not interview.is_free:
         raise HTTPException(402, "Payment required")
+    if interview.started_at:
+        ends_at = interview.started_at + timedelta(
+            minutes=interview.duration_minutes + REALTIME_GRACE_MINUTES
+        )
+        if datetime.now(timezone.utc) > ends_at:
+            raise HTTPException(403, "This interview's time is up")
 
     questions = json.loads(interview.questions_json or "[]")
 
@@ -423,7 +445,9 @@ async def get_realtime_token(
 
 
 @router.post("/coaching")
+@limiter.limit(COACHING_LIMIT)
 async def get_coaching(
+    request: Request,
     interview_id: str,
     req: CoachingRequest,
     user: User = Depends(get_current_user),
@@ -574,7 +598,9 @@ async def get_history(
 
 
 @router.post("/{interview_id}/study-materials")
+@limiter.limit(STUDY_LIMIT)
 async def generate_study_materials(
+    request: Request,
     interview_id: str,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

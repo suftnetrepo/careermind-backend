@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from app.core.rate_limit import limiter, CHECKOUT_LIMIT
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -24,7 +25,9 @@ class CreateCheckoutRequest(BaseModel):
 
 
 @router.post("/checkout")
+@limiter.limit(CHECKOUT_LIMIT)
 async def create_checkout(
+    request: Request,
     req: CreateCheckoutRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

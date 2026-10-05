@@ -1,4 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from app.core.rate_limit import (
+    limiter, client_ip, REGISTER_LIMIT, LOGIN_LIMIT, VERIFY_EMAIL_LIMIT, RESEND_VERIFY_LIMIT,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel, EmailStr
@@ -7,7 +10,9 @@ from app.db.models import User
 from app.core.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token, decode_token,
+    create_email_verification_token,
 )
+from app.services.email import send_verification_email
 from app.core.deps import get_current_user
 import uuid
 
@@ -35,8 +40,18 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
 @router.post("/register", response_model=TokenResponse, status_code=201)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(REGISTER_LIMIT, key_func=client_ip)
+async def register(
+    request: Request,
+    req: RegisterRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     if len(req.password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
 
@@ -54,6 +69,12 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
 
+    # Sent after the response so a slow or failing email never blocks sign-up
+    background_tasks.add_task(
+        send_verification_email,
+        user.email, user.name, create_email_verification_token(str(user.id), user.email),
+    )
+
     return TokenResponse(
         access_token=create_access_token(str(user.id), user.email),
         refresh_token=create_refresh_token(str(user.id)),
@@ -61,7 +82,8 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit(LOGIN_LIMIT, key_func=client_ip)
+async def login(request: Request, req: LoginRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == req.email.lower()))
     user = result.scalar_one_or_none()
 
@@ -101,5 +123,46 @@ async def me(user: User = Depends(get_current_user)):
         "email":              user.email,
         "has_free_interview": user.has_free_interview,
         "free_minutes":       user.free_minutes,
+        "email_verified":     bool(user.email_verified),
         "created_at":         user.created_at.isoformat() if user.created_at else None,
     }
+
+
+@router.post("/verify-email")
+@limiter.limit(VERIFY_EMAIL_LIMIT, key_func=client_ip)
+async def verify_email(request: Request, req: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """Confirm an email address from the link in the verification email. No login needed —
+    the link may be opened on a different device."""
+    payload = decode_token(req.token)
+    if not payload or payload.get("type") != "email_verify":
+        raise HTTPException(400, "This verification link is invalid or has expired")
+    try:
+        user_id = uuid.UUID(payload["sub"])
+    except (KeyError, ValueError):
+        raise HTTPException(400, "This verification link is invalid or has expired")
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user or user.email != payload.get("email"):
+        raise HTTPException(400, "This verification link is invalid or has expired")
+
+    if not user.email_verified:
+        user.email_verified = True
+        await db.commit()
+    return {"verified": True, "email": user.email}
+
+
+@router.post("/resend-verification")
+@limiter.limit(RESEND_VERIFY_LIMIT)
+async def resend_verification(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+):
+    if user.email_verified:
+        return {"sent": False, "already_verified": True}
+    background_tasks.add_task(
+        send_verification_email,
+        user.email, user.name, create_email_verification_token(str(user.id), user.email),
+    )
+    return {"sent": True, "already_verified": False}

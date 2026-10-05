@@ -8,7 +8,14 @@ _url = settings.database_url or "postgresql+asyncpg://localhost/careermind"
 if _url.startswith("postgresql://"):
     _url = _url.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(_url, echo=settings.debug)
+# Neon suspends idle computes and drops their connections: test each pooled
+# connection before use and recycle long-lived ones
+engine = create_async_engine(
+    _url,
+    echo=settings.debug,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
 
 AsyncSessionLocal = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False

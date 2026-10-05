@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, field_validator
 from functools import lru_cache
 
 
@@ -22,7 +22,21 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = Field(default="", env="STRIPE_WEBHOOK_SECRET")
 
     frontend_url: str = Field(default="http://localhost:3000", env="FRONTEND_URL")
+
+    # Transactional email (Brevo) — same provider as Learnify
+    brevo_api_key: str = Field(default="", env="BREVO_API_KEY")
+    brevo_from_email: str = Field(default="", env="BREVO_FROM_EMAIL")
+    brevo_from_name: str = Field(default="CareerMind", env="BREVO_FROM_NAME")
+    email_verify_ttl_hours: int = 24
     api_url: str = Field(default="http://localhost:8000", env="API_URL")
+
+    @field_validator("jwt_secret_key")
+    @classmethod
+    def _require_strong_jwt_secret(cls, v: str) -> str:
+        # A missing or default secret would let anyone forge login tokens — refuse to start
+        if v in ("", "change-me-in-production") or len(v) < 32:
+            raise ValueError("JWT_SECRET_KEY must be set to a random secret of at least 32 characters")
+        return v
 
     class Config:
         env_file = ".env"

@@ -38,6 +38,17 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 
+def create_email_verification_token(user_id: str, email: str) -> str:
+    # Stateless: bound to the email it was sent to, so it stops working if the
+    # address changes; expires after email_verify_ttl_hours
+    expire = datetime.now(timezone.utc) + timedelta(hours=settings.email_verify_ttl_hours)
+    return jwt.encode(
+        {"sub": user_id, "email": email, "exp": expire, "type": "email_verify"},
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+
+
 def decode_token(token: str) -> Optional[dict]:
     try:
         return jwt.decode(

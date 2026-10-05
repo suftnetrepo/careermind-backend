@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     brevo_from_email: str = Field(default="", env="BREVO_FROM_EMAIL")
     brevo_from_name: str = Field(default="CareerMind", env="BREVO_FROM_NAME")
     email_verify_ttl_hours: int = 24
+
+    # Shared secret for the scheduled /interviews/cleanup-old-data job
+    cleanup_secret: str = Field(default="", env="CLEANUP_SECRET")
     api_url: str = Field(default="http://localhost:8000", env="API_URL")
 
     @field_validator("jwt_secret_key")

@@ -3,7 +3,7 @@ from app.core.rate_limit import (
     limiter, SETUP_LIMIT, UPLOAD_CV_LIMIT, REALTIME_TOKEN_LIMIT, COACHING_LIMIT, STUDY_LIMIT,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, update
+from sqlalchemy import select, desc, update, or_
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from openai import AsyncOpenAI
@@ -19,6 +19,7 @@ import asyncio
 import httpx
 import io
 import logging
+import hmac
 import time
 import uuid
 import json
@@ -610,6 +611,68 @@ async def get_feedback_status(
         "score":    interview.overall_score,
         "feedback": json.loads(interview.feedback_json) if interview.feedback_json else None,
         "retrying": retrying,
+    }
+
+
+DATA_RETENTION_DAYS = 365
+
+
+@router.post("/cleanup-old-data", include_in_schema=False)
+async def cleanup_old_data(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Internal endpoint — called by a scheduled
+    job to clean up data older than 12 months.
+    Protected by a secret key, not user auth.
+
+    Clears transcripts, CV text, quizzes and flashcards; keeps the interview
+    record, score and feedback for the user's history, minus the verbatim
+    answer quotes stored in feedback.
+    """
+    secret = request.headers.get("X-Cleanup-Secret", "")
+    expected = settings.cleanup_secret
+    if not expected or not hmac.compare_digest(secret.encode(), expected.encode()):
+        raise HTTPException(403, "Forbidden")
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=DATA_RETENTION_DAYS)
+    old = InterviewSession.created_at < cutoff
+
+    # One bulk UPDATE, touching only rows that still hold data
+    cleared = await db.execute(
+        update(InterviewSession)
+        .where(old, or_(
+            InterviewSession.transcript_json.isnot(None),
+            InterviewSession.cv_text.isnot(None),
+            InterviewSession.quiz_json.isnot(None),
+            InterviewSession.flashcards_json.isnot(None),
+        ))
+        .values(transcript_json=None, cv_text=None, quiz_json=None, flashcards_json=None)
+    )
+
+    # Feedback is kept, but its per-question "evidence" quotes the candidate verbatim
+    rows = await db.execute(
+        select(InterviewSession).where(old, InterviewSession.feedback_json.like('%"evidence": "_%'))
+    )
+    quotes_removed = 0
+    for interview in rows.scalars():   # the LIKE also matches already-blank quotes
+        feedback = json.loads(interview.feedback_json)
+        questions = feedback.get("questions", [])
+        if not any(q.get("evidence") for q in questions):
+            continue
+        for q in questions:
+            q["evidence"] = ""
+        interview.feedback_json = json.dumps(feedback)
+        quotes_removed += 1
+
+    await db.commit()
+    logger.info("Data cleanup: %d interviews cleared, %d feedback quotes removed (cutoff %s)",
+                cleared.rowcount, quotes_removed, cutoff.isoformat())
+    return {
+        "cleaned": cleared.rowcount,
+        "feedback_quotes_removed": quotes_removed,
+        "cutoff":  cutoff.isoformat(),
     }
 
 

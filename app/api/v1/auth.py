@@ -3,10 +3,10 @@ from app.core.rate_limit import (
     limiter, client_ip, REGISTER_LIMIT, LOGIN_LIMIT, VERIFY_EMAIL_LIMIT, RESEND_VERIFY_LIMIT,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from pydantic import BaseModel, EmailStr
 from app.db.engine import get_db
-from app.db.models import User
+from app.db.models import User, InterviewSession
 from app.core.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token, decode_token,
@@ -14,7 +14,10 @@ from app.core.auth import (
 )
 from app.services.email import send_verification_email
 from app.core.deps import get_current_user
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -166,3 +169,22 @@ async def resend_verification(
         user.email, user.name, create_email_verification_token(str(user.id), user.email),
     )
     return {"sent": True, "already_verified": False}
+
+
+@router.delete("/account")
+async def delete_account(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Hard delete the user account and all
+    associated data — interviews, transcripts,
+    CV text, feedback, quiz, flashcards.
+    """
+    interviews = await db.execute(
+        delete(InterviewSession).where(InterviewSession.user_id == user.id)
+    )
+    await db.execute(delete(User).where(User.id == user.id))
+    await db.commit()
+    logger.info("Account deleted: %s (%d interviews)", user.id, interviews.rowcount)
+    return {"deleted": True}

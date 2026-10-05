@@ -7,6 +7,7 @@ from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
+from datetime import datetime, timezone
 import logging
 import stripe
 import uuid
@@ -32,6 +33,9 @@ ALLOWED_DURATIONS = [15, 30, 45, 60]
 class CreateCheckoutRequest(BaseModel):
     interview_id:     str
     duration_minutes: int
+    # Consumer Contracts Regulations 2013: the buyer must agree the service
+    # starts immediately and that they lose the 14-day cancellation right
+    consent:          bool = False
 
 
 @router.post("/checkout")
@@ -42,6 +46,8 @@ async def create_checkout(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    if not req.consent:
+        raise HTTPException(400, "Please confirm the interview starts immediately and payments are non-refundable once it has started")
     if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
         raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
     if req.duration_minutes not in ALLOWED_DURATIONS:
@@ -91,6 +97,8 @@ async def create_checkout(
             "user_id":          str(user.id),
             "duration_minutes": str(req.duration_minutes),
             "amount_pence":     str(amount_pence),
+            # Evidence of the cancellation-right waiver, kept on the Stripe session
+            "consent_immediate_start_at": datetime.now(timezone.utc).isoformat(),
         },
         customer_email=user.email,
     )

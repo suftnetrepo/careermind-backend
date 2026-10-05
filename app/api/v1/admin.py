@@ -217,10 +217,9 @@ async def get_interview_detail(
         "amount_pence":     session.amount_pence,
         "overall_score":    session.overall_score,
         "feedback":         _admin_safe_feedback(json.loads(session.feedback_json) if session.feedback_json else None),
-        # Only the question text and labels — no follow-ups or ideal-answer keywords
+        # Labels only — question text is CV-personalised (employers, projects)
         "questions": [
             {
-                "question":   q.get("question", ""),
                 "topic":      q.get("topic", ""),
                 "type":       q.get("type", ""),
                 "difficulty": q.get("difficulty", ""),

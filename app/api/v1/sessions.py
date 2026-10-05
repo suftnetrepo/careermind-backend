@@ -9,6 +9,7 @@ from app.core.deps import get_current_user
 from app.core.pricing import PRICES, FREE_INTERVIEW_MINUTES, INVALID_DURATION, price_display
 from app.config import get_settings
 from datetime import datetime, timezone
+import asyncio
 import logging
 import stripe
 import uuid
@@ -84,7 +85,7 @@ async def create_checkout(
             "quantity": 1,
         }],
         mode="payment",
-        success_url=f"{settings.frontend_url}/interview?id={req.interview_id}&payment=success",
+        success_url=f"{settings.frontend_url}/payment-success?id={req.interview_id}",
         cancel_url=f"{settings.frontend_url}/preview?id={req.interview_id}&payment=cancelled",
         metadata={
             "interview_id":     req.interview_id,
@@ -110,6 +111,36 @@ async def create_checkout(
     }
 
 
+def apply_paid_checkout(interview: InterviewSession, checkout) -> bool:
+    """Mark the interview paid from a completed Stripe checkout session.
+    Returns True if anything changed. Shared by the webhook and the
+    check-ready fallback, so whichever sees the payment first applies it."""
+    if interview.paid or checkout.get("payment_status") != "paid":
+        return False
+    meta = checkout.get("metadata") or {}
+    if meta.get("interview_id") != str(interview.id):
+        return False
+    interview.paid                  = True
+    interview.duration_minutes      = int(meta.get("duration_minutes", 0)) or interview.duration_minutes
+    interview.amount_pence          = int(meta.get("amount_pence", 0)) or interview.amount_pence
+    interview.stripe_payment_intent = checkout.get("payment_intent")
+    return True
+
+
+async def sync_checkout_payment(interview: InterviewSession) -> bool:
+    """Ask Stripe directly whether this interview's checkout was paid — the
+    fallback for a webhook that is late or never arrives. Never raises."""
+    if interview.paid or not interview.stripe_session_id or not settings.stripe_secret_key:
+        return False
+    try:
+        stripe.api_key = settings.stripe_secret_key
+        checkout = await asyncio.to_thread(stripe.checkout.Session.retrieve, interview.stripe_session_id)
+    except Exception:
+        logger.warning("Could not retrieve Stripe session %s", interview.stripe_session_id, exc_info=True)
+        return False
+    return apply_paid_checkout(interview, checkout)
+
+
 @router.post("/webhook")
 async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     payload    = await request.body()
@@ -129,10 +160,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        meta    = session.get("metadata", {})
-        interview_id     = meta.get("interview_id")
-        duration_minutes = int(meta.get("duration_minutes", 0))
-        amount_pence     = int(meta.get("amount_pence", 0))
+        interview_id = session.get("metadata", {}).get("interview_id")
 
         if interview_id and session.get("payment_status") == "paid":
             try:
@@ -147,11 +175,7 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                 )
             )
             interview = result.scalar_one_or_none()
-            if interview and not interview.paid:
-                interview.paid                  = True
-                interview.duration_minutes      = duration_minutes
-                interview.amount_pence          = amount_pence
-                interview.stripe_payment_intent = session.get("payment_intent")
+            if interview and apply_paid_checkout(interview, session):
                 await db.commit()
 
     return {"received": True}

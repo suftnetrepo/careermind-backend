@@ -15,6 +15,7 @@ from app.services.question_generator import generate_questions
 from app.services.study_generator import generate_quiz, generate_flashcards, generate_feedback
 from datetime import datetime, timedelta, timezone
 from app.core.pricing import PRICES, INVALID_DURATION
+from app.api.v1.sessions import sync_checkout_payment
 import asyncio
 import httpx
 import io
@@ -703,6 +704,7 @@ async def get_history(
             "level":            s.level,
             "focus":            s.focus,
             "status":           s.status,
+            "paid":             s.paid,
             "overall_score":    s.overall_score,
             "duration_seconds": s.duration_seconds,
             "created_at":       s.created_at.isoformat() if s.created_at else None,
@@ -816,6 +818,42 @@ async def get_study_materials(
             if interview.study_generated_at
             else None
         ),
+    }
+
+
+@router.get("/{interview_id}/check-ready")
+async def check_ready(
+    interview_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Whether the interview can be started now. Polled by the payment-success
+    page while the Stripe webhook lands, and checked by the mic-check page."""
+    result = await db.execute(
+        select(InterviewSession).where(
+            InterviewSession.id == parse_uuid(interview_id),
+            InterviewSession.user_id == user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(404, "Interview not found")
+
+    # Don't leave the user waiting on a late webhook — ask Stripe directly
+    if not session.paid and await sync_checkout_payment(session):
+        await db.commit()
+
+    return {
+        "id":               str(session.id),
+        "ready":            session.paid and session.status == InterviewStatus.setup,
+        "paid":             session.paid,
+        "is_free":          session.is_free,
+        "already_started":  session.status == InterviewStatus.active,
+        "completed":        session.status == InterviewStatus.completed,
+        "role":             session.role,
+        "level":            session.level,
+        "duration_minutes": session.duration_minutes,
+        "amount_pence":     session.amount_pence,
     }
 
 

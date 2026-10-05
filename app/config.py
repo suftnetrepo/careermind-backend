@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     cleanup_secret: str = Field(default="", env="CLEANUP_SECRET")
     api_url: str = Field(default="http://localhost:8000", env="API_URL")
 
+    @field_validator("frontend_url", "api_url")
+    @classmethod
+    def _normalise_url(cls, v: str) -> str:
+        # CORS compares origins exactly — "https://site.com/" never matches the
+        # browser's "https://site.com" — and links are built as f"{url}/path"
+        return v.strip().rstrip("/")
+
     @field_validator("jwt_secret_key")
     @classmethod
     def _require_strong_jwt_secret(cls, v: str) -> str:

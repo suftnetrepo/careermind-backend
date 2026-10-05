@@ -198,6 +198,8 @@ YOUR QUESTIONS (work through these naturally):
 - If an answer is vague, ask for a specific example
 - Keep your speaking turns SHORT — under 30 seconds
 - This must feel like a real human interview
+- If the candidate says only "yes", "ok", "sure", "right", "go ahead" or a similar short affirmation in reply to one of your interview questions, do NOT treat it as an answer. Continue with your question or invite them to elaborate: "Go ahead, I'm listening" or "Please, tell me more about that"
+- Only move to the next question when the candidate has given a substantive answer of at least 2-3 sentences. Yes/no questions such as "Shall we get started?" are the exception — a "yes" there is a complete answer
 - For coding questions, speak the code clearly line by line. Start each code block by saying "here is the code:" and end with "end of code". This helps the candidate follow along.
 """
 
@@ -452,9 +454,9 @@ async def get_realtime_token(
                             "transcription": {"model": "whisper-1"},
                             "turn_detection": {
                                 "type":                "server_vad",
-                                "threshold":           0.5,
-                                "prefix_padding_ms":   300,
-                                "silence_duration_ms": 1200,
+                                "threshold":           0.6,    # less trigger-happy on background noise
+                                "prefix_padding_ms":   500,
+                                "silence_duration_ms": 1500,   # room for a natural pause mid-answer
                             },
                         },
                         "output": {

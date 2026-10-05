@@ -127,6 +127,7 @@ async def me(user: User = Depends(get_current_user)):
         "has_free_interview": user.has_free_interview,
         "free_minutes":       user.free_minutes,
         "email_verified":     bool(user.email_verified),
+        "is_admin":           bool(user.is_admin),
         "created_at":         user.created_at.isoformat() if user.created_at else None,
     }
 

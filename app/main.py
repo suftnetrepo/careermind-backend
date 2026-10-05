@@ -8,8 +8,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import get_settings
-from app.db.engine import create_tables
-from app.api.v1 import auth, sessions, interviews
+from app.db.migrations import run_migrations
+from app.api.v1 import auth, sessions, interviews, admin
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -43,7 +43,8 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await create_tables()
+    # Migrations own the schema: create_all never adds columns to existing tables
+    await run_migrations()
     yield
 
 
@@ -74,6 +75,7 @@ app.add_middleware(
 app.include_router(auth.router,      prefix="/api/v1")
 app.include_router(sessions.router,  prefix="/api/v1")
 app.include_router(interviews.router, prefix="/api/v1")
+app.include_router(admin.router,      prefix="/api/v1")
 
 
 @app.get("/health")

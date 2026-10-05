@@ -5,7 +5,7 @@ from sqlalchemy import (
     Text, ForeignKey, Enum as SAEnum,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
+from sqlalchemy.sql import false, func
 from app.db.engine import Base
 
 
@@ -31,6 +31,7 @@ class User(Base):
     status          = Column(SAEnum(UserStatus), default=UserStatus.active)
     free_minutes    = Column(Integer, default=15)  # one free interview on signup
     email_verified  = Column(Boolean, default=False)
+    is_admin        = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at      = Column(DateTime(timezone=True), server_default=func.now())
     updated_at      = Column(DateTime(timezone=True), onupdate=func.now())
 

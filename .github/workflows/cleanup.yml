@@ -1,0 +1,31 @@
+name: Daily data cleanup
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC every day
+  workflow_dispatch:      # allow manual trigger
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run cleanup
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          CLEANUP_SECRET: ${{ secrets.CLEANUP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BACKEND_URL" ] || [ -z "$CLEANUP_SECRET" ]; then
+            echo "::error::Set the BACKEND_URL and CLEANUP_SECRET repository secrets"
+            exit 1
+          fi
+          # --max-time allows for Render waking the service; --fail-with-body
+          # fails the job on 403/5xx and still shows the response
+          curl -sS -X POST "$BACKEND_URL/api/v1/interviews/cleanup-old-data" \
+            -H "X-Cleanup-Secret: $CLEANUP_SECRET" \
+            --fail-with-body \
+            --max-time 120 \
+            --retry 3 \
+            --retry-delay 5
+          echo

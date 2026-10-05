@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc, and_, cast, Date
 from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_admin_user
+from app.api.v1.interviews import parse_uuid
 from datetime import datetime, timezone, timedelta
+import json
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -159,6 +161,76 @@ async def get_interviews(
     ]
     total = await db.scalar(select(func.count(InterviewSession.id)))
     return {"interviews": interviews, "total": total, "page": page, "pages": _pages(total, limit)}
+
+
+def _admin_safe_feedback(feedback: dict | None) -> dict | None:
+    """Scores and written feedback only. Each question's "evidence" quotes the
+    candidate's answer verbatim — transcript content — so it is removed."""
+    if not feedback:
+        return None
+    return {
+        **feedback,
+        "questions": [
+            {k: v for k, v in q.items() if k != "evidence"}
+            for q in feedback.get("questions", [])
+        ],
+    }
+
+
+@router.get("/interviews/{interview_id}")
+async def get_interview_detail(
+    interview_id: str,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Admin view of a single interview.
+    Returns scores, feedback and question
+    breakdown. Never returns transcript,
+    CV text or raw audio.
+    """
+    result = await db.execute(
+        select(InterviewSession, User.name, User.email)
+        .join(User, InterviewSession.user_id == User.id)
+        .where(InterviewSession.id == parse_uuid(interview_id))
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "Interview not found")
+
+    session, user_name, user_email = row
+    questions = json.loads(session.questions_json or "[]")
+
+    return {
+        "id":               str(session.id),
+        "user_name":        user_name,
+        "user_email":       user_email,
+        "role":             session.role,
+        "level":            session.level,
+        "focus":            session.focus,
+        "voice":            session.voice,
+        "duration_minutes": session.duration_minutes,
+        "duration_seconds": session.duration_seconds,
+        "status":           session.status,
+        "is_free":          session.is_free,
+        "paid":             session.paid,
+        "amount_pence":     session.amount_pence,
+        "overall_score":    session.overall_score,
+        "feedback":         _admin_safe_feedback(json.loads(session.feedback_json) if session.feedback_json else None),
+        # Only the question text and labels — no follow-ups or ideal-answer keywords
+        "questions": [
+            {
+                "question":   q.get("question", ""),
+                "topic":      q.get("topic", ""),
+                "type":       q.get("type", ""),
+                "difficulty": q.get("difficulty", ""),
+            }
+            for q in questions
+        ],
+        "created_at": session.created_at.isoformat() if session.created_at else None,
+        "started_at": session.started_at.isoformat() if session.started_at else None,
+        "ended_at":   session.ended_at.isoformat() if session.ended_at else None,
+    }
 
 
 @router.get("/revenue")

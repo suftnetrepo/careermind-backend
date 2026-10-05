@@ -7,11 +7,21 @@ from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
+import logging
 import stripe
 import uuid
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
+logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def parse_uuid(value: str) -> uuid.UUID:
+    """A malformed ID in a URL or body is a missing resource, not a server error."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Not found")
 
 RATE_PENCE_PER_MINUTE = 20   # £0.20 per minute
 MIN_MINUTES = 15
@@ -40,7 +50,7 @@ async def create_checkout(
     # Verify interview belongs to user and is in setup state
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(req.interview_id),
+            InterviewSession.id == parse_uuid(req.interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -123,9 +133,15 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         amount_pence     = int(meta.get("amount_pence", 0))
 
         if interview_id and session.get("payment_status") == "paid":
+            try:
+                interview_uuid = uuid.UUID(interview_id)
+            except ValueError:
+                # Acknowledge anyway: a non-2xx makes Stripe retry the event for days
+                logger.error("Stripe webhook with malformed interview_id %r (session %s)", interview_id, session.get("id"))
+                return {"received": True}
             result = await db.execute(
                 select(InterviewSession).where(
-                    InterviewSession.id == uuid.UUID(interview_id)
+                    InterviewSession.id == interview_uuid
                 )
             )
             interview = result.scalar_one_or_none()

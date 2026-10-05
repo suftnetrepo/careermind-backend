@@ -19,11 +19,20 @@ import asyncio
 import httpx
 import io
 import logging
+import time
 import uuid
 import json
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def parse_uuid(value: str) -> uuid.UUID:
+    """A malformed ID in a URL or body is a missing resource, not a server error."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Not found")
 
 REALTIME_TOKEN_TTL_SECONDS = 60
 # The interview timer runs in the browser, so the server stops issuing voice
@@ -52,6 +61,28 @@ async def _generate_quiz_with_retry(role, level, questions, transcript):
 # asyncio only keeps weak references to tasks — hold background feedback jobs
 # here so they aren't garbage-collected before they finish
 _feedback_tasks: set[asyncio.Task] = set()
+# Interviews with a feedback job running, and when each last started — so the
+# status endpoint's retry can't pile up jobs while the page polls every 3s
+_feedback_running: set[str] = set()
+_feedback_started_at: dict[str, float] = {}
+FEEDBACK_RETRY_AFTER_SECONDS = 120     # completed this long with no feedback → assume the job was lost
+FEEDBACK_RETRY_COOLDOWN_SECONDS = 60
+
+
+def _start_feedback_job(interview_id: str, role: str, level: str) -> bool:
+    """Start background feedback generation unless one is already running."""
+    if interview_id in _feedback_running:
+        return False
+    _feedback_running.add(interview_id)
+    _feedback_started_at[interview_id] = time.monotonic()
+    task = asyncio.create_task(_generate_and_save_feedback(interview_id, role, level))
+    _feedback_tasks.add(task)
+
+    def _done(t: asyncio.Task):
+        _feedback_tasks.discard(t)
+        _feedback_running.discard(interview_id)
+    task.add_done_callback(_done)
+    return True
 
 
 async def _generate_and_save_feedback(interview_id: str, role: str, level: str):
@@ -337,7 +368,7 @@ async def start_interview(
     """Mark interview as active. Requires the interview to be paid (or free)."""
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(req.interview_id),
+            InterviewSession.id == parse_uuid(req.interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -369,7 +400,7 @@ async def get_realtime_token(
     """Create a short-lived Realtime API client secret for the browser's WebRTC call."""
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -456,7 +487,7 @@ async def get_coaching(
     """Analyse a candidate answer and return coaching feedback."""
     result = await db.execute(
         select(InterviewSession.id).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -520,7 +551,7 @@ async def end_interview(
     """Mark interview as completed and save transcript."""
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(req.interview_id),
+            InterviewSession.id == parse_uuid(req.interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -537,11 +568,7 @@ async def end_interview(
     await db.commit()
 
     # Score in the background — the page polls /feedback-status until it's ready
-    task = asyncio.create_task(
-        _generate_and_save_feedback(str(session.id), session.role, session.level)
-    )
-    _feedback_tasks.add(task)
-    task.add_done_callback(_feedback_tasks.discard)
+    _start_feedback_job(str(session.id), session.role, session.level)
 
     return {"status": "completed", "interview_id": str(session.id)}
 
@@ -554,17 +581,35 @@ async def get_feedback_status(
 ):
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(404, "Interview not found")
+
+    # Feedback is generated in-process after /end; a deploy or restart in that
+    # window loses the job. If it's overdue, start it again.
+    retrying = False
+    if (interview.status == InterviewStatus.completed
+            and not interview.feedback_json
+            and interview.ended_at):
+        overdue = (datetime.now(timezone.utc) - interview.ended_at).total_seconds() > FEEDBACK_RETRY_AFTER_SECONDS
+        if overdue:
+            key = str(interview.id)
+            last = _feedback_started_at.get(key)
+            if key in _feedback_running:
+                retrying = True
+            elif last is None or time.monotonic() - last > FEEDBACK_RETRY_COOLDOWN_SECONDS:
+                logger.warning("Feedback missing for %s — regenerating", key)
+                retrying = _start_feedback_job(key, interview.role, interview.level)
+
     return {
         "ready":    bool(interview.feedback_json),
         "score":    interview.overall_score,
         "feedback": json.loads(interview.feedback_json) if interview.feedback_json else None,
+        "retrying": retrying,
     }
 
 
@@ -612,7 +657,7 @@ async def generate_study_materials(
     """
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -680,7 +725,7 @@ async def get_study_materials(
 ):
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )
@@ -714,7 +759,7 @@ async def get_interview(
     """Get a single interview session with full details."""
     result = await db.execute(
         select(InterviewSession).where(
-            InterviewSession.id == uuid.UUID(interview_id),
+            InterviewSession.id == parse_uuid(interview_id),
             InterviewSession.user_id == user.id,
         )
     )

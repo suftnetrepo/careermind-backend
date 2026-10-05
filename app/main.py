@@ -1,4 +1,9 @@
 import logging
+import os
+import sentry_sdk
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+from sentry_sdk.scrubber import DEFAULT_DENYLIST, EventScrubber
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -9,6 +14,28 @@ from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
 settings = get_settings()
+
+# Error tracking — set up like Edquis: off until SENTRY_DSN is set, 10% of
+# requests traced. Request bodies here carry CVs, transcripts and answers as
+# well as passwords and tokens, so those fields are scrubbed before sending.
+SENTRY_SCRUBBED_FIELDS = [
+    "refresh_token", "access_token", "client_secret",
+    "cv_text", "transcript_json", "transcript", "answer", "question",
+    "job_description", "custom_prompt", "stripe-signature",
+]
+sentry_dsn = os.getenv("SENTRY_DSN", "")
+if sentry_dsn:
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        integrations=[FastApiIntegration(), SqlalchemyIntegration()],
+        traces_sample_rate=0.1,
+        environment=os.getenv("SENTRY_ENVIRONMENT") or os.getenv("ENVIRONMENT", "development"),
+        send_default_pii=False,
+        # Frame variables hold raw request headers, CVs and transcripts that the
+        # scrubber can't recognise — keep stack traces, drop the variables
+        include_local_variables=False,
+        event_scrubber=EventScrubber(denylist=DEFAULT_DENYLIST + SENTRY_SCRUBBED_FIELDS, recursive=True),
+    )
 
 # App loggers (email delivery, feedback jobs, rate limits) go to stdout for Render's log view
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")

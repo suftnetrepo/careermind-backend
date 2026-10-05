@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
+from app.core.pricing import PRICES, FREE_INTERVIEW_MINUTES, INVALID_DURATION, price_display
 from app.config import get_settings
 from datetime import datetime, timezone
 import logging
@@ -23,11 +24,6 @@ def parse_uuid(value: str) -> uuid.UUID:
         return uuid.UUID(value)
     except (ValueError, AttributeError, TypeError):
         raise HTTPException(status_code=404, detail="Not found")
-
-RATE_PENCE_PER_MINUTE = 20   # £0.20 per minute
-MIN_MINUTES = 15
-MAX_MINUTES = 60
-ALLOWED_DURATIONS = [15, 30, 45, 60]
 
 
 class CreateCheckoutRequest(BaseModel):
@@ -48,10 +44,9 @@ async def create_checkout(
 ):
     if not req.consent:
         raise HTTPException(400, "Please confirm the interview starts immediately and payments are non-refundable once it has started")
-    if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
-        raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
-    if req.duration_minutes not in ALLOWED_DURATIONS:
-        raise HTTPException(400, f"Duration must be one of: {ALLOWED_DURATIONS}")
+    amount_pence = PRICES.get(req.duration_minutes)
+    if not amount_pence:
+        raise HTTPException(400, INVALID_DURATION)
 
     # Verify interview belongs to user and is in setup state
     result = await db.execute(
@@ -68,8 +63,7 @@ async def create_checkout(
     if interview.paid:
         raise HTTPException(400, "Interview already paid")
 
-    amount_pence = req.duration_minutes * RATE_PENCE_PER_MINUTE
-    amount_pounds = f"£{amount_pence / 100:.2f}"
+    amount_pounds = price_display(amount_pence)
 
     if not settings.stripe_secret_key:
         raise HTTPException(503, "Payment system not configured")
@@ -165,15 +159,11 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
 
 @router.get("/pricing")
 async def get_pricing():
-    """Return pricing info for the frontend slider."""
+    """Session prices and the free interview length."""
     return {
-        "rate_pence_per_minute": RATE_PENCE_PER_MINUTE,
-        "min_minutes":           MIN_MINUTES,
-        "max_minutes":           MAX_MINUTES,
-        "examples": [
-            {"minutes": 15, "pence": 300,  "display": "£3.00"},
-            {"minutes": 30, "pence": 600,  "display": "£6.00"},
-            {"minutes": 45, "pence": 900,  "display": "£9.00"},
-            {"minutes": 60, "pence": 1200, "display": "£12.00"},
+        "prices": [
+            {"minutes": minutes, "pence": pence, "display": price_display(pence)}
+            for minutes, pence in PRICES.items()
         ],
+        "free_minutes": FREE_INTERVIEW_MINUTES,
     }

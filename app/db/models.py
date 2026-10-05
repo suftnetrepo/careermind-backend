@@ -29,7 +29,7 @@ class User(Base):
     name            = Column(String, nullable=False)
     hashed_password = Column(String, nullable=False)
     status          = Column(SAEnum(UserStatus), default=UserStatus.active)
-    free_minutes    = Column(Integer, default=15)  # one free interview on signup
+    free_minutes    = Column(Integer, default=10)  # one free interview on signup
     email_verified  = Column(Boolean, default=False)
     is_admin        = Column(Boolean, nullable=False, default=False, server_default=false())
     created_at      = Column(DateTime(timezone=True), server_default=func.now())

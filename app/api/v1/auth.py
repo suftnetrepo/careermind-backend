@@ -14,6 +14,7 @@ from app.core.auth import (
 )
 from app.services.email import send_verification_email
 from app.core.deps import get_current_user
+from app.core.pricing import FREE_INTERVIEW_MINUTES
 import logging
 import uuid
 
@@ -67,7 +68,7 @@ async def register(
         email=req.email.lower(),
         name=req.name.strip(),
         hashed_password=hash_password(req.password),
-        free_minutes=15,
+        free_minutes=FREE_INTERVIEW_MINUTES,
     )
     db.add(user)
     await db.commit()

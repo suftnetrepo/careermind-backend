@@ -5,6 +5,7 @@ from app.db.engine import get_db
 from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_admin_user
 from app.api.v1.interviews import parse_uuid
+from app.core.pricing import PRICES, price_display
 from datetime import datetime, timezone, timedelta
 import json
 
@@ -12,7 +13,7 @@ router = APIRouter(prefix="/admin", tags=["Admin"])
 
 PAGE_LIMIT_MAX = 100
 REVENUE_DAYS = 30
-DURATION_TIERS = [(15, "15 min — £3"), (30, "30 min — £6"), (45, "45 min — £9"), (60, "60 min — £12")]
+DURATION_TIERS = [(minutes, f"{minutes} min — {price_display(pence)}") for minutes, pence in PRICES.items()]
 
 # A paid, non-free interview is one sale
 SOLD = and_(InterviewSession.paid == True, InterviewSession.is_free == False)  # noqa: E712

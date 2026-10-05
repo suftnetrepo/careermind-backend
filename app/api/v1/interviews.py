@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.services.question_generator import generate_questions
 from app.services.study_generator import generate_quiz, generate_flashcards, generate_feedback
 from datetime import datetime, timedelta, timezone
-from app.api.v1.sessions import RATE_PENCE_PER_MINUTE, MIN_MINUTES, MAX_MINUTES, ALLOWED_DURATIONS
+from app.core.pricing import PRICES, INVALID_DURATION
 import asyncio
 import httpx
 import io
@@ -206,9 +206,6 @@ YOUR QUESTIONS (work through these naturally):
 
 router = APIRouter(prefix="/interviews", tags=["Interviews"])
 
-FREE_INTERVIEW_MINUTES = 15
-
-
 class SetupRequest(BaseModel):
     role:             str = Field(min_length=1, max_length=100)
     level:            str
@@ -248,7 +245,8 @@ async def setup_interview(
 ):
     """Generate questions and create a pending interview session.
 
-    A user's first interview is free (15 minutes) and pre-paid; every later
+    A user's first interview is free (10 minutes, or 15 for accounts created
+    before the change) and pre-paid; every later
     interview stays unpaid until Stripe checkout completes.
     """
     if req.voice not in REALTIME_VOICES:
@@ -257,11 +255,8 @@ async def setup_interview(
     # a confirmed email address. Paid interviews go through Stripe instead.
     if user.has_free_interview and not user.email_verified:
         raise HTTPException(403, "Confirm your email address to use your free interview — check your inbox for the link.")
-    if not user.has_free_interview:
-        if not MIN_MINUTES <= req.duration_minutes <= MAX_MINUTES:
-            raise HTTPException(400, f"Duration must be between {MIN_MINUTES} and {MAX_MINUTES} minutes")
-        if req.duration_minutes not in ALLOWED_DURATIONS:
-            raise HTTPException(400, f"Duration must be one of: {ALLOWED_DURATIONS}")
+    if not user.has_free_interview and req.duration_minutes not in PRICES:
+        raise HTTPException(400, INVALID_DURATION)
 
     generate = lambda: generate_questions(
         role=req.role,
@@ -301,6 +296,10 @@ async def setup_interview(
         is_free=False,
     )
 
+    # The free interview lasts as long as the account was promised — read it
+    # before the claim below zeroes it
+    free_minutes = user.free_minutes
+
     # Claim the free interview atomically so concurrent setups can't both use it
     claimed = await db.execute(
         update(User)
@@ -311,9 +310,13 @@ async def setup_interview(
     if claimed.scalar_one_or_none():
         session.is_free          = True
         session.paid             = True
-        session.duration_minutes = FREE_INTERVIEW_MINUTES
+        session.duration_minutes = free_minutes
     else:
-        session.amount_pence = session.duration_minutes * RATE_PENCE_PER_MINUTE
+        # Duration was only validated if the user had no free interview when the
+        # request started — a concurrent setup may have claimed it since
+        session.amount_pence = PRICES.get(session.duration_minutes)
+        if not session.amount_pence:
+            raise HTTPException(400, INVALID_DURATION)
 
     db.add(session)
     await db.commit()

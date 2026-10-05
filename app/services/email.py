@@ -5,6 +5,7 @@ import re
 from datetime import datetime
 
 from app.config import get_settings
+from app.core.pricing import FREE_INTERVIEW_MINUTES
 from app.services.brevo_sender import BrevoEmailSender, Recipient, SendParams
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ async def send_verification_email(to: str, name: str, token: str) -> bool:
     html = base_template(
         h1("Confirm your email")
         + p(f"Hi {first}, thanks for joining CareerMind.")
-        + p("Confirm your email address to unlock your <strong>free 15-minute interview</strong> with Alex, our AI interviewer.")
+        + p(f"Confirm your email address to unlock your <strong>free {FREE_INTERVIEW_MINUTES}-minute interview</strong> with Alex, our AI interviewer.")
         + btn("Confirm email address", url)
         + p(f'<span style="font-size:13px;color:#94a3b8">This link expires in {settings.email_verify_ttl_hours} hours. '
             "If you didn't create a CareerMind account, you can ignore this email.</span>"),

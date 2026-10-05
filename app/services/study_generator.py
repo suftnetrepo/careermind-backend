@@ -551,9 +551,13 @@ Rules:
 - For a question that was not covered, set score to 0, feedback to "Not reached in this interview." and improvement to ""
 - Do not penalise the dimension or overall scores for questions that were not covered
 - overall_score should roughly match the average score of the covered questions
-- Strengths and improvements must be SPECIFIC to this interview, never generic — reference actual things the candidate said
+- Strengths and improvements must be SPECIFIC to this interview, never generic — describe what the candidate actually did or said, without quoting it
 - Give 2-3 strengths and 2-3 improvements; if there is genuinely nothing strong, give fewer strengths
-- feedback: 1-2 sentences specific to what they said; improvement: one concrete actionable tip"""
+- feedback: 1-2 sentences specific to what they said; improvement: one concrete actionable tip
+- NEVER mention the candidate's employer names, company names, or specific organisations from their CV or answers
+- NEVER quote the candidate's exact words in feedback, improvement, strengths or improvements ("evidence" is the only field that quotes them)
+- Refer to experience generically: "your previous role", "a past project", "your experience" — never by company name
+- Strengths and improvements must describe skills and behaviours, not specific employers or organisations"""
 
     response = await client.chat.completions.create(
         model=settings.openai_model,

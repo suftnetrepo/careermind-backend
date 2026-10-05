@@ -522,6 +522,7 @@ Vary your tags across the session. If the last 2 notes were both pitfall, look f
 {f"The previous coaching note was tagged '{req.last_tag}'. Try to vary the tag if possible." if req.last_tag in COACHING_TAGS else ""}
 
 Be specific to what they actually said.
+Never mention employer names, company names or organisations from their answer — say "your previous role" or "a past project" instead.
 Keep each field under 20 words.
 """
 

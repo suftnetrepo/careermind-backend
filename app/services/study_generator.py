@@ -8,6 +8,10 @@ import random
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# Models offered for quiz and flashcard generation — "Standard" and "Premium"
+STUDY_MODELS = ("gpt-4o", "gpt-4o-mini")
+DEFAULT_STUDY_MODEL = "gpt-4o"
+
 QUIZ_SIZE = 25
 QUIZ_MIN = 20
 QUIZ_BATCHES = 5
@@ -265,6 +269,7 @@ def _to_quiz_item(raw: dict) -> dict | None:
 
 async def _quiz_batch(
     client: AsyncOpenAI,
+    model: str,
     role: str,
     level: str,
     batch_topics: list[str],
@@ -304,7 +309,7 @@ STRICT RULES:
     for attempt in range(2):
         try:
             response = await client.chat.completions.create(
-                model=settings.openai_model,
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5,
                 max_tokens=3000,
@@ -327,6 +332,7 @@ async def generate_quiz(
     level: str,
     questions: list[dict],
     transcript: list[dict] | None = None,
+    model: str = DEFAULT_STUDY_MODEL,
 ) -> list[dict]:
     """
     Generate 25 role-specific multiple choice questions covering every topic in
@@ -349,7 +355,7 @@ async def generate_quiz(
         for i in range(QUIZ_BATCHES)
     ]
     batches = await asyncio.gather(*[
-        _quiz_batch(client, role, level, bt, topics, BATCH_MIX, assignments[i])
+        _quiz_batch(client, model, role, level, bt, topics, BATCH_MIX, assignments[i])
         for i, bt in enumerate(batch_topics) if bt
     ])
 
@@ -371,7 +377,7 @@ async def generate_quiz(
         counts = {_topic_label(t): sum(q["topic"] == _topic_label(t) for q in unique) for t in topics}
         least = sorted(topics, key=lambda t: counts[_topic_label(t)])[:max(2, missing)]
         extra = await _quiz_batch(
-            client, role, level, least, topics, mix, avoid=[q["question"] for q in unique],
+            client, model, role, level, least, topics, mix, avoid=[q["question"] for q in unique],
         )
         unique += [q for q in extra if not _is_duplicate(q["question"], role, seen)]
 
@@ -386,6 +392,7 @@ async def generate_flashcards(
     level: str,
     questions: list[dict],
     cv_text: str | None = None,
+    model: str = DEFAULT_STUDY_MODEL,
 ) -> list[dict]:
     """
     Generate flashcards from interview
@@ -417,7 +424,7 @@ CANDIDATE CV:
 {cv_text[:4000]}""" if cv_text else ""}"""
 
     response = await client.chat.completions.create(
-        model=settings.openai_model,
+        model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.6,
         max_tokens=4000,

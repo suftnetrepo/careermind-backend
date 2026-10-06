@@ -12,7 +12,9 @@ from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
-from app.services.study_generator import generate_quiz, generate_flashcards, generate_feedback
+from app.services.study_generator import (
+    generate_quiz, generate_flashcards, generate_feedback, STUDY_MODELS, DEFAULT_STUDY_MODEL,
+)
 from datetime import datetime, timedelta, timezone
 from app.core.pricing import PRICES, INVALID_DURATION
 from app.api.v1.sessions import sync_checkout_payment
@@ -48,17 +50,17 @@ MAX_CV_BYTES = 5 * 1024 * 1024
 CV_TEXT_LIMIT = 8000
 SETUP_RETRY_DELAY_SECONDS = 2
 FEEDBACK_RETRY_DELAY_SECONDS = 3
-STUDY_TIMEOUT_SECONDS = 60.0
+STUDY_TIMEOUT_SECONDS = 90.0   # gpt-4o-mini takes 35-55s for the full set
 QUIZ_RETRY_DELAY_SECONDS = 2
 
 
-async def _generate_quiz_with_retry(role, level, questions, transcript):
+async def _generate_quiz_with_retry(role, level, questions, transcript, model=DEFAULT_STUDY_MODEL):
     try:
-        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript)
+        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript, model=model)
     except Exception as e:
         logger.warning("Quiz generation attempt 1 failed: %s. Retrying...", e)
         await asyncio.sleep(QUIZ_RETRY_DELAY_SECONDS)
-        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript)
+        return await generate_quiz(role=role, level=level, questions=questions, transcript=transcript, model=model)
 
 # asyncio only keeps weak references to tasks — hold background feedback jobs
 # here so they aren't garbage-collected before they finish
@@ -228,6 +230,10 @@ class CoachingRequest(BaseModel):
     answer:   str
     role:     str
     last_tag: Optional[str] = None
+
+
+class StudyMaterialsRequest(BaseModel):
+    model: str = DEFAULT_STUDY_MODEL
 
 
 class EndRequest(BaseModel):
@@ -718,6 +724,7 @@ async def get_history(
 async def generate_study_materials(
     request: Request,
     interview_id: str,
+    req: Optional[StudyMaterialsRequest] = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -732,6 +739,10 @@ async def generate_study_materials(
             InterviewSession.user_id == user.id,
         )
     )
+    model = (req or StudyMaterialsRequest()).model
+    if model not in STUDY_MODELS:
+        raise HTTPException(400, f"Model must be one of: {list(STUDY_MODELS)}")
+
     interview = result.scalar_one_or_none()
     if not interview:
         raise HTTPException(404, "Interview not found")
@@ -747,6 +758,7 @@ async def generate_study_materials(
             "quiz":       json.loads(interview.quiz_json),
             "flashcards": json.loads(interview.flashcards_json),
             "cached":     True,
+            "model":      interview.study_model,
         }
 
     questions = json.loads(interview.questions_json or "[]")
@@ -757,13 +769,14 @@ async def generate_study_materials(
         quiz, flashcards = await asyncio.wait_for(
             asyncio.gather(
                 _generate_quiz_with_retry(
-                    interview.role, interview.level, questions, transcript,
+                    interview.role, interview.level, questions, transcript, model,
                 ),
                 generate_flashcards(
                     role=interview.role,
                     level=interview.level,
                     questions=questions,
                     cv_text=interview.cv_text,
+                    model=model,
                 ),
             ),
             timeout=STUDY_TIMEOUT_SECONDS,
@@ -779,12 +792,14 @@ async def generate_study_materials(
     interview.quiz_json = json.dumps(quiz)
     interview.flashcards_json = json.dumps(flashcards)
     interview.study_generated_at = datetime.now(timezone.utc)
+    interview.study_model = model
     await db.commit()
 
     return {
         "quiz":       quiz,
         "flashcards": flashcards,
         "cached":     False,
+        "model":      model,
     }
 
 
@@ -818,6 +833,7 @@ async def get_study_materials(
             if interview.study_generated_at
             else None
         ),
+        "model": interview.study_model,
     }
 
 

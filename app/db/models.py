@@ -83,5 +83,6 @@ class InterviewSession(Base):
     quiz_json          = Column(Text, nullable=True)
     flashcards_json    = Column(Text, nullable=True)
     study_generated_at = Column(DateTime(timezone=True), nullable=True)
+    study_model        = Column(String, nullable=True)   # which model wrote them
 
     created_at       = Column(DateTime(timezone=True), server_default=func.now())

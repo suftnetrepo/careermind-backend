@@ -267,6 +267,74 @@ def _to_quiz_item(raw: dict) -> dict | None:
     }
 
 
+# A correct answer this much longer than the wrong ones' average is a giveaway
+LENGTH_BIAS_RATIO = 1.15
+
+
+def _length_biased(raw: dict) -> bool:
+    """True if the correct answer is the longest option by a clear margin."""
+    correct = len(raw["correct_answer"])
+    wrong = [len(w) for w in raw["wrong_answers"]]
+    return bool(wrong) and correct > max(wrong) and correct > LENGTH_BIAS_RATIO * sum(wrong) / len(wrong)
+
+
+BALANCE_SCHEMA = _schema("balanced", "items", {
+    "index":         {"type": "integer"},
+    "wrong_answers": {"type": "array", "items": {"type": "string"}},
+    "explanation":   {"type": "string"},
+})
+
+
+async def _balance_answer_lengths(client: AsyncOpenAI, model: str, role: str, raws: list[dict]) -> list[dict]:
+    """Models make the correct answer the longest, most detailed option ~75% of
+    the time, so length alone gives it away. Rewrite the wrong answers of the
+    worst cases to match it. The correct answer itself is never changed, so the
+    answer key can't break; the explanation is rewritten because it describes
+    the wrong answers. On any failure the originals are kept."""
+    biased = [i for i, r in enumerate(raws) if len(r.get("wrong_answers", [])) == 3 and _length_biased(r)]
+    if not biased:
+        return raws
+    items_text = "\n\n".join(
+        f"Item {i}\nQuestion: {raws[i]['question']}\n"
+        f"Correct answer ({len(raws[i]['correct_answer'])} characters): {raws[i]['correct_answer']}\n"
+        f"Current wrong answers: {json.dumps(raws[i]['wrong_answers'])}"
+        for i in biased
+    )
+    prompt = f"""These multiple choice questions for a {role} quiz have a flaw: the correct answer is longer and more detailed than the wrong answers, so a candidate can guess it from length alone.
+
+For each item, rewrite the 3 wrong answers so that:
+- each is roughly the same length as the correct answer, and at least one is a little LONGER than it
+- each is as specific and technical as the correct answer, naming real APIs, tools or behaviours
+- each is still definitely wrong, and plausible to someone who half-knows {role}
+- none repeats or paraphrases the correct answer
+
+Then rewrite the explanation: why the correct answer is right and why each new wrong answer is wrong, referring to them by what they say — never "the first/second wrong answer" or a letter, because the answers are shuffled before display. Return "index" exactly as given.
+
+{items_text}"""
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=3000,
+            response_format=BALANCE_SCHEMA,
+        )
+        fixed = json.loads(response.choices[0].message.content or "{}").get("items", [])
+    except Exception:
+        logger.exception("Answer-length balancing failed; keeping original answers")
+        return raws
+    out = list(raws)
+    for item in fixed:
+        i, wrong = item.get("index"), item.get("wrong_answers", [])
+        if i not in biased or len(wrong) != 3:
+            continue
+        answers = [out[i]["correct_answer"], *wrong]
+        if len({a.strip().lower() for a in answers}) != 4:
+            continue
+        out[i] = {**out[i], "wrong_answers": wrong, "explanation": item.get("explanation") or out[i]["explanation"]}
+    return out
+
+
 async def _quiz_batch(
     client: AsyncOpenAI,
     model: str,
@@ -303,7 +371,7 @@ STRICT RULES:
 2. No duplicates — each question tests something different
 3. "topic" must be the topic's short name from the list above
 4. Give one unambiguously correct answer and exactly 3 plausible wrong answers that someone who knows {role} might pick
-5. Make all four answers similar in length and level of detail, so the correct one doesn't stand out
+5. Make all four answers similar in length and level of detail, so the correct one doesn't stand out. The correct answer must NOT usually be the longest: sometimes make it the shortest, sometimes medium, only sometimes the longest. Write wrong answers that are as specific and technical as the correct one
 6. The explanation says why the correct answer is right and why the wrong answers are wrong, referring to them by what they say (answers are shuffled before display)"""
 
     for attempt in range(2):
@@ -318,7 +386,8 @@ STRICT RULES:
             content = response.choices[0].message.content
             if not content:
                 raise ValueError(f"no content (refusal: {response.choices[0].message.refusal!r})")
-            items = [q for q in map(_to_quiz_item, json.loads(content)["questions"]) if q]
+            raws = await _balance_answer_lengths(client, model, role, json.loads(content)["questions"])
+            items = [q for q in map(_to_quiz_item, raws) if q]
             if items:
                 return items
             raise ValueError("no valid questions in batch")

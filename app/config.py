@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # Transactional email (Brevo) — same provider as Learnify
     brevo_api_key: str = Field(default="", env="BREVO_API_KEY")
     brevo_from_email: str = Field(default="", env="BREVO_FROM_EMAIL")
-    brevo_from_name: str = Field(default="CareerMind", env="BREVO_FROM_NAME")
+    brevo_from_name: str = Field(default="Interquis", env="BREVO_FROM_NAME")
     email_verify_ttl_hours: int = 24
 
     # Shared secret for the scheduled /interviews/cleanup-old-data job

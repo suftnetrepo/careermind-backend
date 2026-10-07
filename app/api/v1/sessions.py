@@ -78,7 +78,7 @@ async def create_checkout(
                 "currency":     "gbp",
                 "unit_amount":  amount_pence,
                 "product_data": {
-                    "name":        f"CareerMind — {req.duration_minutes} minute interview",
+                    "name":        f"Interquis — {req.duration_minutes} minute interview",
                     "description": f"{req.duration_minutes} minutes · {interview.role} · {interview.level}",
                 },
             },

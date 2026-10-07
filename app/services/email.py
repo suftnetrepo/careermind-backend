@@ -1,4 +1,4 @@
-"""Transactional email — Brevo delivery with CareerMind templates (structure adapted from Learnify)."""
+"""Transactional email — Brevo delivery with Interquis templates (structure adapted from Learnify)."""
 import html as html_lib
 import logging
 import re
@@ -42,7 +42,7 @@ def base_template(content: str, preheader: str = "") -> str:
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="color-scheme" content="light" />
-  <title>CareerMind</title>
+  <title>Interquis</title>
   <style>
     body, table, td, a {{ -webkit-text-size-adjust:100%; -ms-text-size-adjust:100%; }}
     table {{ border-collapse:collapse !important; }}
@@ -65,7 +65,7 @@ def base_template(content: str, preheader: str = "") -> str:
             <tr><td height="5" bgcolor="#6366f1" style="height:5px;line-height:5px;font-size:0">&nbsp;</td></tr>
             <tr>
               <td class="email-header" style="padding:25px 36px 23px;border-bottom:1px solid #eef2f7">
-                <div style="font-size:20px;line-height:24px;font-weight:800;letter-spacing:-0.02em;color:#111827">Career<span style="color:#6366f1">Mind</span></div>
+                <div style="font-size:20px;line-height:24px;font-weight:800;letter-spacing:-0.02em;color:#111827">Inter<span style="color:#6366f1">quis</span></div>
                 <div style="font-size:11px;line-height:16px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8">Practice interviews. Land the job.</div>
               </td>
             </tr>
@@ -73,7 +73,7 @@ def base_template(content: str, preheader: str = "") -> str:
             <tr>
               <td class="email-footer" style="padding:22px 36px 24px;border-top:1px solid #eef2f7;background:#f8fafc">
                 <p style="margin:0;font-size:11px;line-height:17px;color:#94a3b8;text-align:center">
-                  &copy; {year} CareerMind&nbsp;&nbsp;·&nbsp;&nbsp;<a href="{app}/privacy" style="color:#64748b">Privacy</a>
+                  &copy; {year} Interquis&nbsp;&nbsp;·&nbsp;&nbsp;<a href="{app}/privacy" style="color:#64748b">Privacy</a>
                   &nbsp;&nbsp;·&nbsp;&nbsp;<a href="{app}/terms" style="color:#64748b">Terms</a>
                   <br />This transactional email was sent to your registered address.
                 </p>
@@ -144,11 +144,11 @@ async def send_verification_email(to: str, name: str, token: str) -> bool:
     first = escape_html(name.split()[0] if name.strip() else "there")
     html = base_template(
         h1("Confirm your email")
-        + p(f"Hi {first}, thanks for joining CareerMind.")
+        + p(f"Hi {first}, thanks for joining Interquis.")
         + p(f"Confirm your email address to unlock your <strong>free {FREE_INTERVIEW_MINUTES}-minute interview</strong> with Alex, our AI interviewer.")
         + btn("Confirm email address", url)
         + p(f'<span style="font-size:13px;color:#94a3b8">This link expires in {settings.email_verify_ttl_hours} hours. '
-            "If you didn't create a CareerMind account, you can ignore this email.</span>"),
+            "If you didn't create an Interquis account, you can ignore this email.</span>"),
         preheader="Confirm your email to unlock your free interview",
     )
-    return await send_email(to, "Confirm your email for CareerMind", html)
+    return await send_email(to, "Confirm your email for Interquis", html)

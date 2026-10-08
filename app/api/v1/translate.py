@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from app.core.rate_limit import limiter, TRANSLATE_LIMIT, TRANSLATE_IMAGE_LIMIT
+from app.core.rate_limit import limiter, TRANSLATE_LIMIT, TRANSLATE_IMAGE_LIMIT, TRANSCRIBE_LIMIT, TTS_LIMIT
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, delete, func
 from pydantic import BaseModel, Field
@@ -26,6 +26,11 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 IMAGE_TYPES = ("image/jpeg", "image/png", "image/webp", "image/gif")
 DEFAULT_TONE = "neutral"
 PAGE_LIMIT_MAX = 100
+MAX_AUDIO_BYTES = 25 * 1024 * 1024   # Whisper's own upload limit
+# Whisper detects the format from the file name; expo-av records AAC in .m4a on iOS
+AUDIO_FORMATS = ("m4a", "mp3", "mp4", "mpeg", "mpga", "wav", "webm", "ogg", "flac")
+TTS_MAX_CHARS = 4096
+TTS_VOICE = "nova"
 
 IMAGE_SCHEMA = {
     "type": "json_schema",
@@ -64,12 +69,26 @@ class ImageTranslateRequest(BaseModel):
     tone:         Optional[str] = Field(default=None, max_length=50)
 
 
+class TranscribeRequest(BaseModel):
+    audio_base64: str = Field(min_length=1)
+    format:       str = "m4a"
+    # ISO-639-1 hint ("fr"); Whisper detects the language when it's omitted
+    language:     Optional[str] = Field(default=None, min_length=2, max_length=5)
+
+
+class TtsRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=TTS_MAX_CHARS)
+    # Accepted for the app's convenience; OpenAI TTS picks the language from the text
+    lang: Optional[str] = Field(default=None, max_length=10)
+
+
 class PhraseRequest(BaseModel):
+    # Either a translation to copy from, or the phrase spelled out in full
     translation_id:  Optional[str] = None
-    source_lang:     str = Field(min_length=1, max_length=50)
-    target_lang:     str = Field(min_length=1, max_length=50)
-    source_text:     str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
-    translated_text: str = Field(min_length=1, max_length=MAX_TEXT_CHARS)
+    source_lang:     Optional[str] = Field(default=None, min_length=1, max_length=50)
+    target_lang:     Optional[str] = Field(default=None, min_length=1, max_length=50)
+    source_text:     Optional[str] = Field(default=None, min_length=1, max_length=MAX_TEXT_CHARS)
+    translated_text: Optional[str] = Field(default=None, min_length=1, max_length=MAX_TEXT_CHARS)
     category:        Optional[str] = Field(default=None, max_length=50)
 
 
@@ -99,6 +118,19 @@ def _phrase_out(p: PhrasebookEntry) -> dict:
     }
 
 
+def _decode_base64(data: str, max_bytes: int, what: str) -> bytes:
+    # base64 is 4/3 the size of the bytes — reject oversized input before decoding it
+    if len(data) > max_bytes * 4 // 3 + 4:
+        raise HTTPException(413, f"{what} is too large (max {max_bytes // (1024 * 1024)}MB)")
+    try:
+        raw = base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, f"{what} is not valid base64")
+    if not raw:
+        raise HTTPException(400, f"{what} is empty")
+    return raw
+
+
 def _decode_image(req: ImageTranslateRequest) -> tuple[str, str]:
     """Validate the upload and return (mime_type, base64 data) for the vision call."""
     data, mime = req.image_base64.strip(), req.mime_type
@@ -108,15 +140,7 @@ def _decode_image(req: ImageTranslateRequest) -> tuple[str, str]:
     mime = (mime or "image/jpeg").lower()
     if mime not in IMAGE_TYPES:
         raise HTTPException(415, f"Image must be one of: {', '.join(IMAGE_TYPES)}")
-    # base64 is 4/3 the size of the bytes — reject oversized input before decoding it
-    if len(data) > MAX_IMAGE_BYTES * 4 // 3 + 4:
-        raise HTTPException(413, "Image is too large (max 5MB)")
-    try:
-        raw = base64.b64decode(data, validate=True)
-    except (binascii.Error, ValueError):
-        raise HTTPException(400, "Image is not valid base64")
-    if not raw:
-        raise HTTPException(400, "Image is empty")
+    _decode_base64(data, MAX_IMAGE_BYTES, "Image")
     return mime, data
 
 
@@ -224,6 +248,61 @@ async def translate_image(
     return {**out, "detected_lang": result.get("detected_lang")}
 
 
+@router.post("/translate/transcribe")
+@limiter.limit(TRANSCRIBE_LIMIT)
+async def transcribe_audio(
+    request: Request,
+    req: TranscribeRequest,
+    user: User = Depends(get_current_user),
+):
+    """Transcribe base64 audio with Whisper. Nothing is stored — the app sends
+    the text on to /translate/text (type "voice"), which saves it."""
+    fmt = req.format.lower().lstrip(".")
+    if fmt not in AUDIO_FORMATS:
+        raise HTTPException(415, f"Audio format must be one of: {', '.join(AUDIO_FORMATS)}")
+    data = req.audio_base64.strip()
+    if data.startswith("data:"):
+        data = data.partition(",")[2]
+    audio = _decode_base64(data, MAX_AUDIO_BYTES, "Audio")
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    try:
+        transcript = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(f"audio.{fmt}", audio),
+            **({"language": req.language.lower()} if req.language else {}),
+        )
+    except Exception:
+        logger.exception("Transcription failed")
+        raise HTTPException(502, "Transcription unavailable. Please try again.")
+    return {"text": transcript.text.strip()}
+
+
+@router.post("/translate/tts")
+@limiter.limit(TTS_LIMIT)
+async def text_to_speech(
+    request: Request,
+    req: TtsRequest,
+    user: User = Depends(get_current_user),
+):
+    """Speak text with OpenAI TTS and return it as base64 MP3."""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "text required")
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    try:
+        response = await client.audio.speech.create(
+            model="tts-1",
+            voice=TTS_VOICE,
+            input=text,
+            response_format="mp3",
+        )
+    except Exception:
+        logger.exception("Text to speech failed")
+        raise HTTPException(502, "Speech unavailable. Please try again.")
+    return {"audio_base64": base64.b64encode(response.content).decode(), "format": "mp3"}
+
+
 @router.get("/translate/history")
 async def get_history(
     page:  int = Query(1, ge=1),
@@ -288,7 +367,8 @@ async def get_phrasebook(
     if category:
         query = query.where(PhrasebookEntry.category == category)
     result = await db.execute(query.order_by(desc(PhrasebookEntry.created_at)))
-    return {"phrases": [_phrase_out(p) for p in result.scalars().all()]}
+    # A plain array — the mobile app's shape
+    return [_phrase_out(p) for p in result.scalars().all()]
 
 
 @router.post("/phrasebook")
@@ -297,27 +377,44 @@ async def save_phrase(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Save a phrase. With just {"translation_id"}, the phrase is copied from
+    that translation; any other fields given override it."""
+    fields = {
+        "source_lang":     req.source_lang,
+        "target_lang":     req.target_lang,
+        "source_text":     req.source_text,
+        "translated_text": req.translated_text,
+    }
     translation_id = None
     if req.translation_id:
-        # Only link to the user's own translations
+        # Only the user's own translations
         translation_id = parse_uuid(req.translation_id)
-        owned = await db.scalar(
-            select(TranslationRecord.id).where(
+        record = await db.scalar(
+            select(TranslationRecord).where(
                 TranslationRecord.id == translation_id,
                 TranslationRecord.user_id == user.id,
             )
         )
-        if not owned:
+        if not record:
             raise HTTPException(404, "Translation not found")
+        # Saving the same translation twice returns the phrase already saved
+        existing = await db.scalar(
+            select(PhrasebookEntry).where(
+                PhrasebookEntry.user_id == user.id,
+                PhrasebookEntry.translation_id == translation_id,
+            )
+        )
+        if existing:
+            return _phrase_out(existing)
+        fields = {k: v if v is not None else getattr(record, k) for k, v in fields.items()}
+    elif any(v is None for v in fields.values()):
+        raise HTTPException(422, "Give a translation_id, or source_lang, target_lang, source_text and translated_text")
 
     entry = PhrasebookEntry(
         user_id=user.id,
         translation_id=translation_id,
-        source_lang=req.source_lang,
-        target_lang=req.target_lang,
-        source_text=req.source_text,
-        translated_text=req.translated_text,
         category=req.category,
+        **fields,
     )
     db.add(entry)
     await db.commit()

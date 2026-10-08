@@ -86,3 +86,33 @@ class InterviewSession(Base):
     study_model        = Column(String, nullable=True)   # which model wrote them
 
     created_at       = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# ── Tranquis (AI translation) ─────────────────────────────
+
+class TranslationRecord(Base):
+    __tablename__ = "translations"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id         = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    type            = Column(String, default="text")   # text | voice | camera
+    source_lang     = Column(String, nullable=False)
+    target_lang     = Column(String, nullable=False)
+    source_text     = Column(Text, nullable=False)
+    translated_text = Column(Text, nullable=False)
+    tone            = Column(String, nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PhrasebookEntry(Base):
+    __tablename__ = "phrasebook"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id         = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    translation_id  = Column(UUID(as_uuid=True), ForeignKey("translations.id", ondelete="SET NULL"), nullable=True)
+    source_lang     = Column(String, nullable=False)
+    target_lang     = Column(String, nullable=False)
+    source_text     = Column(Text, nullable=False)
+    translated_text = Column(Text, nullable=False)
+    category        = Column(String, nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())

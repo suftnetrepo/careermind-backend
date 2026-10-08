@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from pydantic import BaseModel, EmailStr
 from app.db.engine import get_db
-from app.db.models import User, InterviewSession
+from app.db.models import User, InterviewSession, TranslationRecord, PhrasebookEntry
 from app.core.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token, decode_token,
@@ -181,11 +181,14 @@ async def delete_account(
     """
     Hard delete the user account and all
     associated data — interviews, transcripts,
-    CV text, feedback, quiz, flashcards.
+    CV text, feedback, quiz, flashcards,
+    translations and saved phrases.
     """
     interviews = await db.execute(
         delete(InterviewSession).where(InterviewSession.user_id == user.id)
     )
+    await db.execute(delete(PhrasebookEntry).where(PhrasebookEntry.user_id == user.id))
+    await db.execute(delete(TranslationRecord).where(TranslationRecord.user_id == user.id))
     await db.execute(delete(User).where(User.id == user.id))
     await db.commit()
     logger.info("Account deleted: %s (%d interviews)", user.id, interviews.rowcount)

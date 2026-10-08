@@ -16,6 +16,8 @@ STUDY_LIMIT          = "10/hour"
 CHECKOUT_LIMIT       = "20/hour"
 VERIFY_EMAIL_LIMIT   = "20/hour"      # per IP — the link may be opened on another device
 RESEND_VERIFY_LIMIT  = "3/hour"       # each one sends an email
+TRANSLATE_LIMIT      = "200/hour"     # each one is a GPT-4o call
+TRANSLATE_IMAGE_LIMIT = "40/hour"     # vision calls cost more
 
 
 def client_ip(request: Request) -> str:

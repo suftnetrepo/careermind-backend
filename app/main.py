@@ -22,6 +22,9 @@ SENTRY_SCRUBBED_FIELDS = [
     "refresh_token", "access_token", "client_secret",
     "cv_text", "transcript_json", "transcript", "answer", "question",
     "job_description", "custom_prompt", "stripe-signature",
+    # Tranquis — what users translate, say or photograph
+    "text", "source_text", "translated_text", "audio_base64", "image_base64",
+    "transcription", "translation",
 ]
 sentry_dsn = os.getenv("SENTRY_DSN", "")
 if sentry_dsn:

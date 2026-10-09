@@ -18,6 +18,34 @@ import logging
 
 # Tranquis — AI translation. Paths are spelled out in full because the router
 # serves both /translate/* and /phrasebook
+# Whisper invents these on silent or near-silent audio (it was trained on
+# subtitled video). A transcription containing one is treated as no speech.
+WHISPER_HALLUCINATIONS = {
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "subtitles by",
+    "transcribed by",
+    "www.",
+    "http",
+}
+
+
+# Whole-transcript outputs Whisper produces on silence; only rejected as the entire text
+WHISPER_SILENCE_EXACT = {"you", "you.", "thank you.", "thanks.", "bye.", "bye-bye.", "..."}
+
+
+def is_hallucination(text: str) -> bool:
+    t = text.strip().lower()
+    if t in WHISPER_SILENCE_EXACT:
+        return True
+    # Two letters is a real answer ("No", "Sí", "OK"); shorter is noise
+    if len(t) < 2:
+        return True
+    return any(phrase in t for phrase in WHISPER_HALLUCINATIONS)
+
+
 router = APIRouter(tags=["Translate"])
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -382,7 +410,10 @@ async def transcribe_audio(
     except Exception:
         logger.exception("Transcription failed")
         raise HTTPException(502, "Transcription unavailable. Please try again.")
-    return {"text": transcript.text.strip()}
+    text = transcript.text.strip()
+    if is_hallucination(text):
+        raise HTTPException(status_code=422, detail="No speech detected")
+    return {"text": text}
 
 
 @router.post("/translate/tts")

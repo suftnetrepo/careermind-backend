@@ -248,6 +248,52 @@ async def translate_image(
     return {**out, "detected_lang": result.get("detected_lang")}
 
 
+@router.post("/translate/{translation_id}/explain")
+@limiter.limit(TRANSLATE_LIMIT)
+async def explain_translation(
+    request: Request,
+    translation_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """A short learner's note on one of the user's translations: the key word
+    choices, grammar and how the tone shows. Generated on demand, not stored."""
+    record = await db.scalar(
+        select(TranslationRecord).where(
+            TranslationRecord.id == parse_uuid(translation_id),
+            TranslationRecord.user_id == user.id,
+        )
+    )
+    if not record:
+        raise HTTPException(404, "Translation not found")
+
+    tone = record.tone or DEFAULT_TONE
+    system = (
+        "You are a friendly language teacher. Explain a translation to a learner in plain English: "
+        "2 to 4 short sentences covering the most useful word choices, any grammar worth noticing, "
+        f"and how the {tone} tone shows. No headings, no lists, no preamble."
+    )
+    user_msg = (
+        f"Original ({record.source_lang}): {record.source_text}\n"
+        f"Translation ({record.target_lang}): {record.translated_text}"
+    )
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    try:
+        response = await client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+            temperature=0.4,
+            max_tokens=300,
+        )
+        explanation = (response.choices[0].message.content or "").strip()
+    except Exception:
+        logger.exception("Explanation failed")
+        raise HTTPException(502, "Explanation unavailable. Please try again.")
+    if not explanation:
+        raise HTTPException(502, "Explanation unavailable. Please try again.")
+    return {"explanation": explanation}
+
+
 @router.post("/translate/transcribe")
 @limiter.limit(TRANSCRIBE_LIMIT)
 async def transcribe_audio(

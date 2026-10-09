@@ -6,13 +6,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from pydantic import BaseModel, EmailStr
 from app.db.engine import get_db
-from app.db.models import User, InterviewSession, TranslationRecord, PhrasebookEntry
+from app.db.models import User, InterviewSession
 from app.core.auth import (
     hash_password, verify_password,
     create_access_token, create_refresh_token, decode_token,
     create_email_verification_token,
 )
-from app.services.email import send_verification_email
+from app.services.email import send_verification_email, send_welcome_tranquis_email
 from app.core.deps import get_current_user
 from app.core.pricing import FREE_INTERVIEW_MINUTES
 import logging
@@ -27,6 +27,7 @@ class RegisterRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
+    app_source: str = "careermind"  # 'careermind' | 'tranquis'
 
 
 class LoginRequest(BaseModel):
@@ -63,21 +64,26 @@ async def register(
     if existing.scalar_one_or_none():
         raise HTTPException(400, "An account with this email already exists")
 
+    app_source = req.app_source if req.app_source in ("careermind", "tranquis") else "careermind"
     user = User(
         id=uuid.uuid4(),
         email=req.email.lower(),
         name=req.name.strip(),
         hashed_password=hash_password(req.password),
         free_minutes=FREE_INTERVIEW_MINUTES,
+        app_source=app_source,
     )
     db.add(user)
     await db.commit()
 
-    # Sent after the response so a slow or failing email never blocks sign-up
-    background_tasks.add_task(
-        send_verification_email,
-        user.email, user.name, create_email_verification_token(str(user.id), user.email),
-    )
+    # Send app-appropriate welcome email (never blocks sign-up)
+    if app_source == "tranquis":
+        background_tasks.add_task(send_welcome_tranquis_email, user.email, user.name)
+    else:
+        background_tasks.add_task(
+            send_verification_email,
+            user.email, user.name, create_email_verification_token(str(user.id), user.email),
+        )
 
     return TokenResponse(
         access_token=create_access_token(str(user.id), user.email),
@@ -181,14 +187,11 @@ async def delete_account(
     """
     Hard delete the user account and all
     associated data — interviews, transcripts,
-    CV text, feedback, quiz, flashcards,
-    translations and saved phrases.
+    CV text, feedback, quiz, flashcards.
     """
     interviews = await db.execute(
         delete(InterviewSession).where(InterviewSession.user_id == user.id)
     )
-    await db.execute(delete(PhrasebookEntry).where(PhrasebookEntry.user_id == user.id))
-    await db.execute(delete(TranslationRecord).where(TranslationRecord.user_id == user.id))
     await db.execute(delete(User).where(User.id == user.id))
     await db.commit()
     logger.info("Account deleted: %s (%d interviews)", user.id, interviews.rowcount)

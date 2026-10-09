@@ -3,12 +3,12 @@ from app.core.rate_limit import (
     limiter, SETUP_LIMIT, UPLOAD_CV_LIMIT, REALTIME_TOKEN_LIMIT, COACHING_LIMIT, STUDY_LIMIT,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, update, delete, or_
+from sqlalchemy import select, desc, update, or_
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from openai import AsyncOpenAI
 from app.db.engine import get_db, AsyncSessionLocal
-from app.db.models import User, InterviewSession, InterviewStatus, TranslationRecord, PhrasebookEntry
+from app.db.models import User, InterviewSession, InterviewStatus
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.services.question_generator import generate_questions
@@ -643,9 +643,6 @@ async def cleanup_old_data(
     Clears transcripts, CV text, quizzes and flashcards; keeps the interview
     record, score and feedback for the user's history, minus the verbatim
     answer quotes stored in feedback.
-
-    Tranquis translations and saved phrases older than 12 months are deleted
-    outright — each row is judged by its own age, so recent data is untouched.
     """
     secret = request.headers.get("X-Cleanup-Secret", "")
     expected = settings.cleanup_secret
@@ -682,19 +679,12 @@ async def cleanup_old_data(
         interview.feedback_json = json.dumps(feedback)
         quotes_removed += 1
 
-    # Phrases first: a phrase can point at a translation (SET NULL either way)
-    phrases = await db.execute(delete(PhrasebookEntry).where(PhrasebookEntry.created_at < cutoff))
-    translations = await db.execute(delete(TranslationRecord).where(TranslationRecord.created_at < cutoff))
-
     await db.commit()
-    logger.info("Data cleanup: %d interviews cleared, %d feedback quotes removed, "
-                "%d translations and %d phrases deleted (cutoff %s)",
-                cleared.rowcount, quotes_removed, translations.rowcount, phrases.rowcount, cutoff.isoformat())
+    logger.info("Data cleanup: %d interviews cleared, %d feedback quotes removed (cutoff %s)",
+                cleared.rowcount, quotes_removed, cutoff.isoformat())
     return {
         "cleaned": cleared.rowcount,
         "feedback_quotes_removed": quotes_removed,
-        "translations_deleted": translations.rowcount,
-        "phrases_deleted": phrases.rowcount,
         "cutoff":  cutoff.isoformat(),
     }
 

@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import get_settings
 from app.db.migrations import run_migrations
-from app.api.v1 import auth, sessions, interviews, admin, translate
+from app.api.v1 import auth, sessions, interviews, admin, translate, phrasebook, password_reset
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -22,7 +22,7 @@ SENTRY_SCRUBBED_FIELDS = [
     "refresh_token", "access_token", "client_secret",
     "cv_text", "transcript_json", "transcript", "answer", "question",
     "job_description", "custom_prompt", "stripe-signature",
-    # Tranquis — what users translate, say or photograph
+    # Tranquis translation fields
     "text", "source_text", "translated_text", "audio_base64", "image_base64",
     "transcription", "translation",
 ]
@@ -75,11 +75,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router,      prefix="/api/v1")
-app.include_router(sessions.router,  prefix="/api/v1")
-app.include_router(interviews.router, prefix="/api/v1")
-app.include_router(admin.router,      prefix="/api/v1")
-app.include_router(translate.router,  prefix="/api/v1")
+app.include_router(auth.router,           prefix="/api/v1")
+app.include_router(password_reset.router, prefix="/api/v1")
+app.include_router(sessions.router,       prefix="/api/v1")
+app.include_router(interviews.router,     prefix="/api/v1")
+app.include_router(admin.router,          prefix="/api/v1")
+app.include_router(translate.router,      prefix="/api/v1")
+app.include_router(phrasebook.router,     prefix="/api/v1")
 
 
 @app.get("/health")

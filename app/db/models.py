@@ -115,4 +115,6 @@ class PhrasebookEntry(Base):
     source_text     = Column(Text, nullable=False)
     translated_text = Column(Text, nullable=False)
     category        = Column(String, nullable=True)
+    section         = Column(String, nullable=True)   # e.g. "Airport & transport"
+    phonetic        = Column(Text, nullable=True)     # pronunciation guide for the translation
     created_at      = Column(DateTime(timezone=True), server_default=func.now())

@@ -10,6 +10,7 @@ from app.db.models import User, TranslationRecord, PhrasebookEntry
 from app.core.deps import get_current_user
 from app.config import get_settings
 from app.api.v1.interviews import parse_uuid
+import asyncio
 import base64
 import binascii
 import json
@@ -31,6 +32,29 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024   # Whisper's own upload limit
 AUDIO_FORMATS = ("m4a", "mp3", "mp4", "mpeg", "mpga", "wav", "webm", "ogg", "flac")
 TTS_MAX_CHARS = 4096
 TTS_VOICE = "nova"
+
+# Phrasebook categories the app shows as chips. Phrases are tagged on save.
+PHRASE_CATEGORIES = ["travel", "food", "hotel", "medical", "business", "general"]
+TAG_MODEL = "gpt-4o-mini"
+BACKFILL_LIMIT = 25
+
+TAG_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "phrase_tags",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "enum": PHRASE_CATEGORIES},
+                "section":  {"type": "string"},
+                "phonetic": {"type": "string"},
+            },
+            "required": ["category", "section", "phonetic"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 IMAGE_SCHEMA = {
     "type": "json_schema",
@@ -114,8 +138,45 @@ def _phrase_out(p: PhrasebookEntry) -> dict:
         "source_text":     p.source_text,
         "translated_text": p.translated_text,
         "category":        p.category,
+        "section":         p.section,
+        "phonetic":        p.phonetic,
         "created_at":      p.created_at.isoformat() if p.created_at else None,
     }
+
+
+async def _tag_phrase(entry: PhrasebookEntry) -> None:
+    """Fill in category (unless the user chose one), section and pronunciation.
+    Best effort: on any failure the phrase simply stays untagged."""
+    prompt = (
+        "Tag this phrasebook entry for a traveller.\n"
+        f"Original ({entry.source_lang}): {entry.source_text}\n"
+        f"Translation ({entry.target_lang}): {entry.translated_text}\n\n"
+        f"category: the best fit of {', '.join(PHRASE_CATEGORIES)} — food covers restaurants, ordering and "
+        "dining; hotel covers accommodation; medical covers health, pharmacies and emergencies; travel covers "
+        "airports, transport and directions; business covers work and meetings; general is everything else.\n"
+        "section: a short sub-topic within that category, 2 to 4 words, sentence case "
+        "(e.g. \"Airport & transport\", \"Getting around\", \"Ordering food\", \"At the pharmacy\").\n"
+        "phonetic: how an English speaker should pronounce the WHOLE translation, every word — syllables joined by hyphens, "
+        "stressed syllables in capitals (e.g. \"DON-de es-TA la PWER-ta\"). If the translation is already "
+        "English, return an empty string."
+    )
+    try:
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        response = await client.chat.completions.create(
+            model=TAG_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=300,
+            response_format=TAG_SCHEMA,
+        )
+        tags = json.loads(response.choices[0].message.content or "{}")
+    except Exception:
+        logger.warning("Phrase tagging failed for %s", entry.id, exc_info=True)
+        return
+    if not entry.category:
+        entry.category = tags.get("category") or "general"
+    entry.section  = (tags.get("section") or "").strip()[:60] or None
+    entry.phonetic = (tags.get("phonetic") or "").strip()[:300] or None
 
 
 def _decode_base64(data: str, max_bytes: int, what: str) -> bytes:
@@ -409,6 +470,16 @@ async def get_phrasebook(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    # Phrases saved before tagging existed get tagged the first time they're listed
+    untagged = (await db.execute(
+        select(PhrasebookEntry)
+        .where(PhrasebookEntry.user_id == user.id, PhrasebookEntry.section.is_(None))
+        .limit(BACKFILL_LIMIT)
+    )).scalars().all()
+    if untagged:
+        await asyncio.gather(*(_tag_phrase(p) for p in untagged))
+        await db.commit()
+
     query = select(PhrasebookEntry).where(PhrasebookEntry.user_id == user.id)
     if category:
         query = query.where(PhrasebookEntry.category == category)
@@ -462,6 +533,7 @@ async def save_phrase(
         category=req.category,
         **fields,
     )
+    await _tag_phrase(entry)
     db.add(entry)
     await db.commit()
     await db.refresh(entry)
